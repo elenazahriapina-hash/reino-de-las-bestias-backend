@@ -125,7 +125,7 @@ genderForm — male | female | unspecified
     }
 
 
-def generate_short_text(prompt: str) -> str:
+def generate_short_text(prompt: str, lang: str) -> str:
 
     language_rule = LANG_INSTRUCTIONS.get(lang, LANG_INSTRUCTIONS["ru"])
     system_instruction = f"""

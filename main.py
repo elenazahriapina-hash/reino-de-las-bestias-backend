@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-
+import re
+from typing import Dict, List, Optional, Union
 from ai import run_short_analysis, generate_short_text, run_full_analysis
-from utils_animals import get_animal_ru_name  # см. ниже
+from utils_animals import get_animal_ru_name, build_image_key  # см. ниже
 
 app = FastAPI()
 
@@ -28,13 +28,14 @@ class TestPayload(BaseModel):
     name: str
     lang: str
     gender: Optional[str] = None
-    answers: List[TestAnswer]
+    answers: Union[List[TestAnswer], Dict[str, str]]
 
 
 class ShortResult(BaseModel):
     animal: str  # EN code
     element: str  # RU: Воздух/Вода/Огонь/Земля
     genderForm: str  # male/female/unspecified
+    imageKey: str
     text: str
 
 
@@ -49,7 +50,7 @@ class FullPayload(BaseModel):
     gender: Optional[str] = None
     animal: str  # EN-код: Wolf, Owl и т.д.
     element: str  # Воздух / Вода / Огонь / Земля
-    answers: List[TestAnswer]
+    answers: Union[List[TestAnswer], Dict[str, str]]
 
 
 class FullResponse(BaseModel):
@@ -57,7 +58,28 @@ class FullResponse(BaseModel):
     result: dict
 
 
+class AnalyzeRequest(BaseModel):
+    name: str
+    lang: str
+    gender: Optional[str] = None
+    answers: List[TestAnswer]
+
+
+class AnalyzeResult(BaseModel):
+    animal: str
+    element: str
+    genderForm: str
+    imageKey: str
+    text: str
+
+
+class AnalyzeResponse(BaseModel):
+    type: str
+    result: AnalyzeResult
+
+
 # -------------------- PROMPT BUILDERS --------------------
+ANSWER_KEY_RE = re.compile(r"^answer_(\d+)$")
 
 
 def build_answers_text(answers: List[TestAnswer]) -> str:
@@ -276,12 +298,29 @@ def build_full_prompt(
 # -------------------- ENDPOINT --------------------
 
 
+def normalize_answers(
+    answers: Union[List[TestAnswer], Dict[str, str]],
+) -> List[TestAnswer]:
+    if isinstance(answers, list):
+        return answers
+    normalized: List[TestAnswer] = []
+    for key, value in answers.items():
+        match = ANSWER_KEY_RE.match(key)
+        if not match or value is None:
+            continue
+        normalized.append(TestAnswer(questionId=int(match.group(1)), answer=str(value)))
+    normalized.sort(key=lambda item: item.questionId)
+    return normalized
+
+
 @app.post("/analyze/short", response_model=ShortResponse)
 def analyze_short(payload: TestPayload):
     try:
         print("📥 SHORT payload:", payload)
 
         answers_text = build_answers_text(payload.answers)
+        normalized_answers = normalize_answers(payload.answers)
+        answers_text = build_answers_text(normalized_answers)
 
         codes = run_short_analysis(
             prompt=f"""
@@ -310,6 +349,11 @@ def analyze_short(payload: TestPayload):
             answers_text=answers_text,
         )
         text = generate_short_text(text_prompt, payload.lang)
+        image_key = build_image_key(
+            animal_code=codes["animal"],
+            element=codes["element"],
+            gender=codes["genderForm"],
+        )
 
         return {
             "type": "short",
@@ -317,6 +361,7 @@ def analyze_short(payload: TestPayload):
                 "animal": codes["animal"],
                 "element": codes["element"],  # ✅ RU: Огонь/Вода/Воздух/Земля
                 "genderForm": codes["genderForm"],
+                "imageKey": image_key,
                 "text": text,
             },
         }
@@ -326,12 +371,68 @@ def analyze_short(payload: TestPayload):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/analyze", response_model=AnalyzeResponse)
+def analyze(payload: AnalyzeRequest):
+    try:
+        print("📥 ANALYZE payload:", payload)
+
+        answers_text = build_answers_text(payload.answers)
+
+        codes = run_short_analysis(
+            prompt=f"""
+Имя: {payload.name}
+Язык: {payload.lang}
+Пол: {payload.gender or "unspecified"}
+
+Ответы пользователя:
+{answers_text}
+""".strip(),
+            lang=payload.lang,
+        )
+
+        animal_ru = get_animal_ru_name(
+            animal_code=codes["animal"],
+            gender=codes["genderForm"],
+        )
+
+        text_prompt = build_short_prompt(
+            name=payload.name,
+            lang=payload.lang,
+            gender=payload.gender or "unspecified",
+            animal_ru=animal_ru,
+            element_ru=codes["element"],
+            answers_text=answers_text,
+        )
+        text = generate_short_text(text_prompt, payload.lang)
+        image_key = build_image_key(
+            animal_code=codes["animal"],
+            element=codes["element"],
+            gender=codes["genderForm"],
+        )
+
+        return {
+            "type": "short",
+            "result": {
+                "animal": codes["animal"],
+                "element": codes["element"],
+                "genderForm": codes["genderForm"],
+                "imageKey": image_key,
+                "text": text,
+            },
+        }
+
+    except Exception as e:
+        print("❌ ANALYZE ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/analyze/full", response_model=FullResponse)
 def analyze_full(payload: FullPayload):
     try:
         print("📥 FULL payload:", payload)
 
-        answers_text = build_answers_text(payload.answers)
+        normalized_answers = normalize_answers(payload.answers)
+        answers_text = build_answers_text(normalized_answers)
 
         prompt = build_full_prompt(
             name=payload.name,

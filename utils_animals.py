@@ -29,3 +29,21 @@ ANIMAL_RU = {
 def get_animal_ru_name(animal_code: str, gender: str) -> str:
     g = "female" if gender == "female" else "male"
     return ANIMAL_RU[animal_code][g]
+
+
+ELEMENT_NUMBER = {
+    "Воздух": 1,
+    "Вода": 2,
+    "Огонь": 3,
+    "Земля": 4,
+}
+
+FEMALE_SUFFIX_ANIMALS = {"Deer", "Fox", "Lion", "Ram"}
+
+
+def build_image_key(animal_code: str, element: str, gender: str) -> str:
+    element_number = ELEMENT_NUMBER.get(element)
+    if not element_number:
+        raise ValueError(f"Unsupported element for image key: {element}")
+    suffix = "_f" if gender == "female" and animal_code in FEMALE_SUFFIX_ANIMALS else ""
+    return f"{animal_code}{element_number}{suffix}"
