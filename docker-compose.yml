@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    container_name: reino_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reino
+      POSTGRES_USER: reino
+      POSTGRES_PASSWORD: reino_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - reino_pgdata:/var/lib/postgresql/data
+
+volumes:
+  reino_pgdata:
