@@ -1,14 +1,29 @@
+import os
+import uuid
+
+from dotenv import load_dotenv
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import re
 from typing import Dict, List, Optional, Union
 from ai import run_short_analysis, generate_short_text, run_full_analysis
-from utils_animals import get_animal_ru_name, build_image_key  # см. ниже
+from db import SessionLocal, engine
+from models import Base, Run, RunAnswer, ShortResult
+from utils_animals import get_animal_ru_name, build_image_key
 
 app = FastAPI()
 
+
 # -------------------- MODELS --------------------
+@app.on_event("startup")
+async def on_startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,10 +47,10 @@ class TestPayload(BaseModel):
 
 
 class ShortResult(BaseModel):
+    runId: str
     animal: str  # EN code
     element: str  # RU: Воздух/Вода/Огонь/Земля
     genderForm: str  # male/female/unspecified
-    imageKey: str
     text: str
 
 
@@ -314,7 +329,7 @@ def normalize_answers(
 
 
 @app.post("/analyze/short", response_model=ShortResponse)
-def analyze_short(payload: TestPayload):
+async def analyze_short(payload: TestPayload):
     try:
         print("📥 SHORT payload:", payload)
 
@@ -349,19 +364,44 @@ def analyze_short(payload: TestPayload):
             answers_text=answers_text,
         )
         text = generate_short_text(text_prompt, payload.lang)
-        image_key = build_image_key(
-            animal_code=codes["animal"],
-            element=codes["element"],
-            gender=codes["genderForm"],
-        )
+        run_id = uuid.uuid4()
+        async with SessionLocal() as session:
+            session.add(
+                Run(
+                    id=run_id,
+                    name=payload.name,
+                    lang=payload.lang,
+                    gender=payload.gender or "unspecified",
+                )
+            )
+            session.add_all(
+                [
+                    RunAnswer(
+                        run_id=run_id,
+                        question_id=answer.questionId,
+                        answer=answer.answer,
+                    )
+                    for answer in normalized_answers
+                ]
+            )
+            session.add(
+                ShortResult(
+                    run_id=run_id,
+                    animal=codes["animal"],
+                    element=codes["element"],
+                    gender_form=codes["genderForm"],
+                    text=text,
+                )
+            )
+            await session.commit()
 
         return {
             "type": "short",
             "result": {
+                "runId": codes["runId"],
                 "animal": codes["animal"],
                 "element": codes["element"],  # ✅ RU: Огонь/Вода/Воздух/Земля
                 "genderForm": codes["genderForm"],
-                "imageKey": image_key,
                 "text": text,
             },
         }
@@ -369,6 +409,31 @@ def analyze_short(payload: TestPayload):
     except Exception as e:
         print("❌ SHORT ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/result/short/{runId}", response_model=ShortResponse)
+async def get_short_result(runId: str):
+    try:
+        run_uuid = uuid.UUID(runId)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Short result not found")
+
+    async with SessionLocal() as session:
+        result = await session.get(ShortResult, run_uuid)
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Short result not found")
+
+    return {
+        "type": "short",
+        "result": {
+            "runId": str(result.run_id),
+            "animal": result.animal,
+            "element": result.element,
+            "genderForm": result.gender_form,
+            "text": result.text,
+        },
+    }
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -453,3 +518,13 @@ def analyze_full(payload: FullPayload):
     except Exception as e:
         print("❌ FULL ANALYSIS ERROR:", e)
         raise HTTPException(status_code=500, detail="Ошибка анализа")
+
+
+@app.get("/health/db")
+async def health_db():
+    try:
+        async with SessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
