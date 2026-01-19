@@ -35,7 +35,7 @@ class RunAnswer(Base):
     answer: Mapped[str] = mapped_column(String(50))
 
 
-class ShortResult(Base):
+class ShortResultORM(Base):
     __tablename__ = "short_results"
 
     run_id: Mapped[uuid.UUID] = mapped_column(

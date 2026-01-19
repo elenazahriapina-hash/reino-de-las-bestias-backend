@@ -8,12 +8,12 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 from sqlalchemy import text as sql_text
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 import re
 from typing import Dict, List, Optional, Union
 from ai import run_short_analysis, generate_short_text, run_full_analysis
 from db import SessionLocal, engine
-from models import Base, Run, RunAnswer, ShortResult
+from models import Base, Run, RunAnswer, ShortResultORM
 from utils_animals import get_animal_ru_name, build_image_key
 
 app = FastAPI()
@@ -48,12 +48,10 @@ class TestPayload(BaseModel):
 
 
 class ShortResult(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    runId: str = Field(alias="run_id")
+    runId: str
     animal: str  # EN code
     element: str  # RU: Воздух/Вода/Огонь/Земля
-    genderForm: str = Field(alias="gender_form")  # male/female/unspecified
+    genderForm: str  # male/female/unspecified
     text: str
 
 
@@ -388,7 +386,7 @@ async def analyze_short(payload: TestPayload):
                 ]
             )
             session.add(
-                ShortResult(
+                ShortResultORM(
                     run_id=run_id,
                     animal=codes["animal"],
                     element=codes["element"],
@@ -422,7 +420,7 @@ async def get_short_result(runId: str):
         raise HTTPException(status_code=404, detail="Short result not found")
 
     async with SessionLocal() as session:
-        result = await session.get(ShortResult, run_uuid)
+        result = await session.get(ShortResultORM, run_uuid)
 
     if result is None:
         raise HTTPException(status_code=404, detail="Short result not found")
