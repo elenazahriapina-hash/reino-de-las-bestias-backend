@@ -47,3 +47,18 @@ class ShortResultORM(Base):
     element: Mapped[str] = mapped_column(String(20))
     gender_form: Mapped[str] = mapped_column(String(20))
     text: Mapped[str] = mapped_column(TEXT)
+
+
+class FullResultORM(Base):
+    __tablename__ = "full_results"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    text: Mapped[str] = mapped_column(TEXT)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )

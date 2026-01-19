@@ -13,7 +13,7 @@ import re
 from typing import Dict, List, Optional, Union
 from ai import run_short_analysis, generate_short_text, run_full_analysis
 from db import SessionLocal, engine
-from models import Base, Run, RunAnswer, ShortResultORM
+from models import Base, Run, RunAnswer, ShortResultORM, FullResultORM
 from utils_animals import get_animal_ru_name, build_image_key
 
 app = FastAPI()
@@ -61,6 +61,7 @@ class ShortResponse(BaseModel):
 
 
 class FullPayload(BaseModel):
+    runId: str
     name: str
     lang: str
     gender: Optional[str] = None
@@ -69,9 +70,14 @@ class FullPayload(BaseModel):
     answers: Union[List[TestAnswer], Dict[str, str]]
 
 
+class FullResult(BaseModel):
+    runId: str
+    text: str
+
+
 class FullResponse(BaseModel):
     type: str
-    result: dict
+    result: FullResult
 
 
 class AnalyzeRequest(BaseModel):
@@ -493,9 +499,14 @@ def analyze(payload: AnalyzeRequest):
 
 
 @app.post("/analyze/full", response_model=FullResponse)
-def analyze_full(payload: FullPayload):
+async def analyze_full(payload: FullPayload):
     try:
         print("📥 FULL payload:", payload)
+
+        try:
+            run_uuid = uuid.UUID(payload.runId)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid runId")
 
         normalized_answers = normalize_answers(payload.answers)
         answers_text = build_answers_text(normalized_answers)
@@ -511,14 +522,42 @@ def analyze_full(payload: FullPayload):
 
         text = run_full_analysis(prompt, payload.lang)
 
+        async with SessionLocal() as session:
+            session.add(
+                FullResultORM(
+                    run_id=run_uuid,
+                    text=text,
+                )
+            )
+            await session.commit()
+
         return {
             "type": "full",
-            "result": {"text": text},
+            "result": {"runId": payload.runId, "text": text},
         }
 
     except Exception as e:
         print("❌ FULL ANALYSIS ERROR:", e)
         raise HTTPException(status_code=500, detail="Ошибка анализа")
+
+
+@app.get("/result/full/{runId}", response_model=FullResponse)
+async def get_full_result(runId: str):
+    try:
+        run_uuid = uuid.UUID(runId)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Full result not found")
+
+    async with SessionLocal() as session:
+        result = await session.get(FullResultORM, run_uuid)
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Full result not found")
+
+    return {
+        "type": "full",
+        "result": {"runId": str(result.run_id), "text": result.text},
+    }
 
 
 @app.get("/health/db")
