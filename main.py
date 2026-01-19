@@ -5,9 +5,10 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
+from sqlalchemy import text as sql_text
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 import re
 from typing import Dict, List, Optional, Union
 from ai import run_short_analysis, generate_short_text, run_full_analysis
@@ -47,10 +48,12 @@ class TestPayload(BaseModel):
 
 
 class ShortResult(BaseModel):
-    runId: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    runId: str = Field(alias="run_id")
     animal: str  # EN code
     element: str  # RU: Воздух/Вода/Огонь/Земля
-    genderForm: str  # male/female/unspecified
+    genderForm: str = Field(alias="gender_form")  # male/female/unspecified
     text: str
 
 
@@ -398,7 +401,7 @@ async def analyze_short(payload: TestPayload):
         return {
             "type": "short",
             "result": {
-                "runId": codes["runId"],
+                "runId": str(run_id),
                 "animal": codes["animal"],
                 "element": codes["element"],  # ✅ RU: Огонь/Вода/Воздух/Земля
                 "genderForm": codes["genderForm"],
@@ -524,7 +527,7 @@ def analyze_full(payload: FullPayload):
 async def health_db():
     try:
         async with SessionLocal() as session:
-            await session.execute(text("SELECT 1"))
+            await session.execute(sql_text("SELECT 1"))
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
