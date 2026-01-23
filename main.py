@@ -14,7 +14,11 @@ from typing import Dict, List, Optional, Union
 from ai import run_short_analysis, generate_short_text, run_full_analysis
 from db import SessionLocal, engine
 from models import Base, Run, RunAnswer, ShortResultORM, FullResultORM
-from utils_animals import get_animal_ru_name, build_image_key
+from utils_animals import (
+    build_image_key,
+    get_animal_display_name,
+    get_element_display_name,
+)
 
 app = FastAPI()
 
@@ -139,15 +143,15 @@ def build_short_prompt(
     name: str,
     lang: str,
     gender: str,
-    animal_ru: str,
-    element_ru: str,
+    animal_display: str,
+    element_display: str,
     answers_text: str,
 ) -> str:
     labels = SHORT_PROMPT_LABELS.get(lang, SHORT_PROMPT_LABELS["ru"])
     return f"""
 ❗ ВАЖНО:
 Используй ТОЛЬКО ЭТО животное:
-{animal_ru}
+{animal_display}
 
 ❌ Запрещено:
 – заменять животное
@@ -198,7 +202,7 @@ pt — португальский
 
 5️⃣ СТРОГАЯ СТРУКТУРА (НЕ МЕНЯТЬ)
 
-{name} — {animal_ru} {element_ru} {{ЗНАЧОК}}
+{name} — {animal_display} {element_display} {{ЗНАЧОК}}
 {{Короткая строка-образ. 3–7 слов.}}
 
 {{Краткое общее описание — 1–2 абзаца}}
@@ -385,9 +389,15 @@ async def analyze_short(payload: TestPayload):
             lang=payload.lang,
         )
 
-        animal_ru = get_animal_ru_name(
+        animal_display = get_animal_display_name(
             animal_code=codes["animal"],
+            lang=payload.lang,
             gender=codes["genderForm"],
+        )
+        element_display = get_element_display_name(
+            element_code=codes["element"],
+            lang=payload.lang,
+            ru_case="genitive_for_archetype_line",
         )
 
         # 3) short text
@@ -395,8 +405,8 @@ async def analyze_short(payload: TestPayload):
             name=payload.name,
             lang=payload.lang,
             gender=payload.gender or "unspecified",
-            animal_ru=animal_ru,
-            element_ru=codes["element"],  # ✅ ВАЖНО: тут RU-стихия
+            animal_display=animal_display,
+            element_display=element_display,
             answers_text=answers_text,
         )
         text = generate_short_text(text_prompt, payload.lang)
@@ -491,17 +501,23 @@ def analyze(payload: AnalyzeRequest):
             lang=payload.lang,
         )
 
-        animal_ru = get_animal_ru_name(
+        animal_display = get_animal_display_name(
             animal_code=codes["animal"],
+            lang=payload.lang,
             gender=codes["genderForm"],
+        )
+        element_display = get_element_display_name(
+            element_code=codes["element"],
+            lang=payload.lang,
+            ru_case="genitive_for_archetype_line",
         )
 
         text_prompt = build_short_prompt(
             name=payload.name,
             lang=payload.lang,
             gender=payload.gender or "unspecified",
-            animal_ru=animal_ru,
-            element_ru=codes["element"],
+            animal_display=animal_display,
+            element_display=element_display,
             answers_text=answers_text,
         )
         text = generate_short_text(text_prompt, payload.lang)

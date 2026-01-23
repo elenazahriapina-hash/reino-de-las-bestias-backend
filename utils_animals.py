@@ -31,12 +31,141 @@ def get_animal_ru_name(animal_code: str, gender: str) -> str:
     return ANIMAL_RU[animal_code][g]
 
 
+ANIMAL_DISPLAY = {
+    "en": {
+        "Wolf": "Wolf",
+        "Lion": "Lion",
+        "Tiger": "Tiger",
+        "Lynx": "Lynx",
+        "Panther": "Panther",
+        "Bear": "Bear",
+        "Fox": "Fox",
+        "Wolverine": "Wolverine",
+        "Deer": "Deer",
+        "Monkey": "Monkey",
+        "Rabbit": "Rabbit",
+        "Buffalo": "Buffalo",
+        "Ram": "Ram",
+        "Capybara": "Capybara",
+        "Elephant": "Elephant",
+        "Horse": "Horse",
+        "Eagle": "Eagle",
+        "Owl": "Owl",
+        "Raven": "Raven",
+        "Parrot": "Parrot",
+        "Snake": "Snake",
+        "Crocodile": "Crocodile",
+        "Turtle": "Turtle",
+        "Lizard": "Lizard",
+    },
+    "es": {
+        "Wolf": "Lobo",
+        "Lion": "León",
+        "Tiger": "Tigre",
+        "Lynx": "Lince",
+        "Panther": "Pantera",
+        "Bear": "Oso",
+        "Fox": "Zorro",
+        "Wolverine": "Glotón",
+        "Deer": "Ciervo",
+        "Monkey": "Mono",
+        "Rabbit": "Conejo",
+        "Buffalo": "Búfalo",
+        "Ram": "Carnero",
+        "Capybara": "Capibara",
+        "Elephant": "Elefante",
+        "Horse": "Caballo",
+        "Eagle": "Águila",
+        "Owl": "Búho",
+        "Raven": "Cuervo",
+        "Parrot": "Loro",
+        "Snake": "Serpiente",
+        "Crocodile": "Cocodrilo",
+        "Turtle": "Tortuga",
+        "Lizard": "Lagarto",
+    },
+    "pt": {
+        "Wolf": "Lobo",
+        "Lion": "Leão",
+        "Tiger": "Tigre",
+        "Lynx": "Lince",
+        "Panther": "Pantera",
+        "Bear": "Urso",
+        "Fox": "Raposa",
+        "Wolverine": "Carcaju",
+        "Deer": "Cervo",
+        "Monkey": "Macaco",
+        "Rabbit": "Coelho",
+        "Buffalo": "Búfalo",
+        "Ram": "Carneiro",
+        "Capybara": "Capivara",
+        "Elephant": "Elefante",
+        "Horse": "Cavalo",
+        "Eagle": "Águia",
+        "Owl": "Coruja",
+        "Raven": "Corvo",
+        "Parrot": "Papagaio",
+        "Snake": "Serpente",
+        "Crocodile": "Crocodilo",
+        "Turtle": "Tartaruga",
+        "Lizard": "Lagarto",
+    },
+}
+
+
+def get_animal_display_name(animal_code: str, lang: str, gender: str) -> str:
+    if lang == "ru":
+        return get_animal_ru_name(animal_code, gender)
+    if lang not in ANIMAL_DISPLAY:
+        return get_animal_ru_name(animal_code, gender)
+    return ANIMAL_DISPLAY[lang].get(animal_code, animal_code)
+
+
 ELEMENT_NUMBER = {
     "Воздух": 1,
     "Вода": 2,
     "Огонь": 3,
     "Земля": 4,
 }
+
+ELEMENT_LABELS = {
+    "ru": {
+        "Воздух": "Воздуха",
+        "Вода": "Воды",
+        "Огонь": "Огня",
+        "Земля": "Земли",
+    },
+    "en": {
+        "Воздух": "Air",
+        "Вода": "Water",
+        "Огонь": "Fire",
+        "Земля": "Earth",
+    },
+    "es": {
+        "Воздух": "Aire",
+        "Вода": "Agua",
+        "Огонь": "Fuego",
+        "Земля": "Tierra",
+    },
+    "pt": {
+        "Воздух": "Ar",
+        "Вода": "Água",
+        "Огонь": "Fogo",
+        "Земля": "Terra",
+    },
+}
+
+
+def get_element_display_name(
+    element_code: str, lang: str, ru_case: str | None = None
+) -> str:
+    if lang == "ru":
+        if ru_case == "genitive_for_archetype_line":
+            return ELEMENT_LABELS["ru"].get(element_code, element_code)
+        return element_code
+    labels = ELEMENT_LABELS.get(lang, ELEMENT_LABELS["ru"])
+    return labels.get(element_code, element_code)
+
 
 FEMALE_SUFFIX_ANIMALS = {"Deer", "Fox", "Lion", "Ram"}
 
