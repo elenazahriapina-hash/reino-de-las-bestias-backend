@@ -345,8 +345,9 @@ def build_full_prompt(
     name: str,
     lang: str,
     gender: Optional[str],
-    animal: str,
-    element: str,
+    animal_display: str,
+    element_label: str,
+    element_display: str,
     answers_text: str,
 ) -> str:
     labels = FULL_PROMPT_LABELS.get(lang, FULL_PROMPT_LABELS["ru"])
@@ -358,8 +359,8 @@ def build_full_prompt(
 
 Архетип зверя и стихия ЗАДАНЫ и НЕ ПЕРЕСМАТРИВАЮТСЯ.
 
-Архетип: {animal}
-Стихия: {element}
+Архетип: {animal_display}
+Стихия: {element_label}
 Пол: {gender}
 
 1️⃣ СИСТЕМА И ГРАНИЦЫ
@@ -434,7 +435,7 @@ def build_full_prompt(
 одного масштаба;
 строго по разделам (как в эталоне).
 6️⃣ СТРОГАЯ СТРУКТУРА ВЫВОДА (НЕ МЕНЯТЬ):
-{name} — {{Архетип (с учётом пола)}} {element}
+{name} — {{Архетип (с учётом пола)}} {element_display}
 (краткое описание архетипа в скобках)
 1. {labels["section_1"]}
 2. {labels["section_2"]}
@@ -686,12 +687,28 @@ async def analyze_full(payload: FullPayload):
             element_code = locked_codes["element"]
             gender_form = locked_codes["genderForm"]
 
+        animal_display = get_animal_display_name(
+            animal_code=animal_code,
+            lang=payload.lang,
+            gender=gender_form,
+        )
+        element_label = get_element_display_name(
+            element_code=element_code,
+            lang=payload.lang,
+        )
+        element_display = get_element_display_name(
+            element_code=element_code,
+            lang=payload.lang,
+            ru_case="genitive_for_archetype_line",
+        )
+
         prompt = build_full_prompt(
             name=payload.name,
             lang=payload.lang,
             gender=gender_form,
-            animal=animal_code,
-            element=element_code,
+            animal_display=animal_display,
+            element_label=element_label,
+            element_display=element_display,
             answers_text=answers_text,
         )
 
