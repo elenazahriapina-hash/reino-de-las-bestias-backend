@@ -11,13 +11,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import re
 from typing import Dict, List, Optional, Union
-from ai import run_short_analysis, generate_short_text, run_full_analysis
+from ai import (
+    ALLOWED_ANIMALS,
+    ALLOWED_ELEMENTS,
+    ALLOWED_GENDERS,
+    run_short_analysis,
+    generate_short_text,
+    run_full_analysis,
+)
 from db import SessionLocal, engine
 from models import Base, Run, RunAnswer, ShortResultORM, FullResultORM
 from utils_animals import (
     build_image_key,
     get_animal_display_name,
     get_element_display_name,
+    ELEMENT_LABELS,
 )
 
 app = FastAPI()
@@ -49,6 +57,9 @@ class TestPayload(BaseModel):
     lang: str
     gender: Optional[str] = None
     answers: Union[List[TestAnswer], Dict[str, str]]
+    lockedAnimal: Optional[str] = None
+    lockedElement: Optional[str] = None
+    lockedGenderForm: Optional[str] = None
 
 
 class ShortResult(BaseModel):
@@ -72,6 +83,9 @@ class FullPayload(BaseModel):
     animal: str  # EN-код: Wolf, Owl и т.д.
     element: str  # Воздух / Вода / Огонь / Земля
     answers: Union[List[TestAnswer], Dict[str, str]]
+    lockedAnimal: Optional[str] = None
+    lockedElement: Optional[str] = None
+    lockedGenderForm: Optional[str] = None
 
 
 class FullResult(BaseModel):
@@ -131,6 +145,61 @@ SHORT_PROMPT_LABELS = {
         "conclusion_title": "Conclusão",
         "point_1": "Ponto 1",
         "point_2": "Ponto 2",
+    },
+}
+
+FULL_PROMPT_LABELS = {
+    "ru": {
+        "section_1": "Общий психопрофиль",
+        "section_2": "Энергетический профиль",
+        "section_3": "Стиль мышления",
+        "section_4": "Социальное взаимодействие",
+        "section_5": "Конфликтность и поведение в напряжённых ситуациях",
+        "values_title": "Ценности",
+        "section_7": "Профессиональный стиль",
+        "section_8": "Сильные стороны",
+        "section_9": "Потенциальные слабые стороны",
+        "section_10": "Жизненный путь",
+        "conclusion_title": "Итог",
+    },
+    "en": {
+        "section_1": "General psychological profile",
+        "section_2": "Energetic profile",
+        "section_3": "Thinking style",
+        "section_4": "Social interaction",
+        "section_5": "Conflict and behavior under tension",
+        "values_title": "Values",
+        "section_7": "Professional style",
+        "section_8": "Strengths",
+        "section_9": "Potential weaknesses",
+        "section_10": "Life path",
+        "conclusion_title": "Conclusion",
+    },
+    "es": {
+        "section_1": "Perfil psicológico general",
+        "section_2": "Perfil energético",
+        "section_3": "Estilo de pensamiento",
+        "section_4": "Interacción social",
+        "section_5": "Conflicto y comportamiento bajo tensión",
+        "values_title": "Valores",
+        "section_7": "Estilo profesional",
+        "section_8": "Fortalezas",
+        "section_9": "Debilidades potenciales",
+        "section_10": "Camino de vida",
+        "conclusion_title": "Conclusión",
+    },
+    "pt": {
+        "section_1": "Perfil psicológico geral",
+        "section_2": "Perfil energético",
+        "section_3": "Estilo de pensamento",
+        "section_4": "Interação social",
+        "section_5": "Conflito e comportamento sob tensão",
+        "values_title": "Valores",
+        "section_7": "Estilo profissional",
+        "section_8": "Pontos fortes",
+        "section_9": "Fraquezas potenciais",
+        "section_10": "Caminho de vida",
+        "conclusion_title": "Conclusão",
     },
 }
 
@@ -236,6 +305,42 @@ pt — португальский
 """.strip()
 
 
+def normalize_locked_element(locked_element: str, lang: str) -> Optional[str]:
+    if locked_element in ALLOWED_ELEMENTS:
+        return locked_element
+    for label_map in (ELEMENT_LABELS.get(lang, {}), ELEMENT_LABELS["ru"]):
+        for element_code, label in label_map.items():
+            if locked_element == label:
+                return element_code
+    for label_map in ELEMENT_LABELS.values():
+        for element_code, label in label_map.items():
+            if locked_element == label:
+                return element_code
+    return None
+
+
+def resolve_locked_codes(
+    locked_animal: Optional[str],
+    locked_element: Optional[str],
+    locked_gender_form: Optional[str],
+    lang: str,
+) -> Optional[Dict[str, str]]:
+    if not (locked_animal and locked_element and locked_gender_form):
+        return None
+    if locked_animal not in ALLOWED_ANIMALS:
+        raise HTTPException(status_code=400, detail="Invalid lockedAnimal")
+    normalized_element = normalize_locked_element(locked_element, lang)
+    if normalized_element not in ALLOWED_ELEMENTS:
+        raise HTTPException(status_code=400, detail="Invalid lockedElement")
+    if locked_gender_form not in ALLOWED_GENDERS:
+        raise HTTPException(status_code=400, detail="Invalid lockedGenderForm")
+    return {
+        "animal": locked_animal,
+        "element": normalized_element,
+        "genderForm": locked_gender_form,
+    }
+
+
 def build_full_prompt(
     name: str,
     lang: str,
@@ -244,6 +349,7 @@ def build_full_prompt(
     element: str,
     answers_text: str,
 ) -> str:
+    labels = FULL_PROMPT_LABELS.get(lang, FULL_PROMPT_LABELS["ru"])
 
     return f"""
 Ты — аналитическая ИИ-модель, формирующая полный психологический профиль личности
@@ -330,17 +436,17 @@ def build_full_prompt(
 6️⃣ СТРОГАЯ СТРУКТУРА ВЫВОДА (НЕ МЕНЯТЬ):
 {name} — {{Архетип (с учётом пола)}} {element}
 (краткое описание архетипа в скобках)
-1. Общий психопрофиль
-2. Энергетический профиль
-3. Стиль мышления
-4. Социальное взаимодействие
-5. Конфликтность и поведение в напряжённых ситуациях
-6. Ценности
-7. Профессиональный стиль
-8. Сильные стороны
-9. Потенциальные слабые стороны
-10. Жизненный путь
-Итог
+1. {labels["section_1"]}
+2. {labels["section_2"]}
+3. {labels["section_3"]}
+4. {labels["section_4"]}
+5. {labels["section_5"]}
+6. {labels["values_title"]}
+7. {labels["section_7"]}
+8. {labels["section_8"]}
+9. {labels["section_9"]}
+10. {labels["section_10"]}
+{labels["conclusion_title"]}
 7️⃣ КЛЮЧЕВОЕ ПРАВИЛО
 Ты не просто описываешь архетип.
 Ты говоришь с человеком на его языке.
@@ -377,8 +483,15 @@ async def analyze_short(payload: TestPayload):
         normalized_answers = normalize_answers(payload.answers)
         answers_text = build_answers_text(normalized_answers)
 
-        codes = run_short_analysis(
-            prompt=f"""
+        codes = resolve_locked_codes(
+            payload.lockedAnimal,
+            payload.lockedElement,
+            payload.lockedGenderForm,
+            payload.lang,
+        )
+        if codes is None:
+            codes = run_short_analysis(
+                prompt=f"""
 Имя: {payload.name}
 Язык: {payload.lang}
 Пол: {payload.gender or "unspecified"}
@@ -386,8 +499,8 @@ async def analyze_short(payload: TestPayload):
 Ответы пользователя:
 {answers_text}
 """.strip(),
-            lang=payload.lang,
-        )
+                lang=payload.lang,
+            )
 
         animal_display = get_animal_display_name(
             animal_code=codes["animal"],
@@ -451,6 +564,9 @@ async def analyze_short(payload: TestPayload):
                 "text": text,
             },
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         print("❌ SHORT ERROR:", repr(e))
@@ -556,12 +672,26 @@ async def analyze_full(payload: FullPayload):
         normalized_answers = normalize_answers(payload.answers)
         answers_text = build_answers_text(normalized_answers)
 
+        locked_codes = resolve_locked_codes(
+            payload.lockedAnimal,
+            payload.lockedElement,
+            payload.lockedGenderForm,
+            payload.lang,
+        )
+        animal_code = payload.animal
+        element_code = payload.element
+        gender_form = payload.gender
+        if locked_codes is not None:
+            animal_code = locked_codes["animal"]
+            element_code = locked_codes["element"]
+            gender_form = locked_codes["genderForm"]
+
         prompt = build_full_prompt(
             name=payload.name,
             lang=payload.lang,
-            gender=payload.gender,
-            animal=payload.animal,
-            element=payload.element,
+            gender=gender_form,
+            animal=animal_code,
+            element=element_code,
             answers_text=answers_text,
         )
 
@@ -580,6 +710,9 @@ async def analyze_full(payload: FullPayload):
             "type": "full",
             "result": {"runId": payload.runId, "text": text},
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         print("❌ FULL ANALYSIS ERROR:", e)
