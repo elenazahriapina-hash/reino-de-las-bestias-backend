@@ -16,3 +16,4 @@ class AnalyzeRequest(BaseModel):
     lockedAnimal: str | None = None
     lockedElement: str | None = None
     lockedGenderForm: str | None = None
+    runId: str | None = None

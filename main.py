@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-from sqlalchemy import text as sql_text
+from sqlalchemy import delete, text as sql_text
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -428,13 +428,50 @@ def normalize_answers(answers: list[TestAnswer]) -> list[TestAnswer]:
     return answers
 
 
+async def ensure_run_and_answers(
+    session,
+    *,
+    run_id: uuid.UUID,
+    payload: AnalyzeRequest,
+    normalized_answers: list[TestAnswer],
+) -> str:
+    existing_run = await session.get(Run, run_id)
+    if existing_run is None:
+        session.add(
+            Run(
+                id=run_id,
+                name=payload.name,
+                lang=payload.lang,
+                gender=payload.gender or "unspecified",
+            )
+        )
+        await session.flush()
+        print(f"🆕 DB: created run {run_id}")
+    else:
+        print(f"🔁 DB: reused run {run_id}")
+
+    await session.execute(delete(RunAnswer).where(RunAnswer.run_id == run_id))
+    answers_to_save = [
+        RunAnswer(
+            run_id=run_id,
+            question_id=answer.questionId,
+            answer=answer.answer,
+        )
+        for answer in normalized_answers
+    ]
+    session.add_all(answers_to_save)
+    print(f"💾 DB: saved answers count={len(answers_to_save)}")
+    return str(run_id)
+
+
 @app.post("/analyze/short", response_model=ShortResponse)
 async def analyze_short(payload: AnalyzeRequest):
     try:
+        requested_run_id = uuid.UUID(payload.runId) if payload.runId else uuid.uuid4()
         print("📥 SHORT payload:", payload)
         print(
             "✅ SHORT parsed:",
-            f"lang={payload.lang}, gender={payload.gender}, answers={len(payload.answers)}",
+            f"lang={payload.lang}, gender={payload.gender}, answers={len(payload.answers)}, run_id={requested_run_id}",
         )
 
         normalized_answers = normalize_answers(payload.answers)
@@ -480,26 +517,16 @@ async def analyze_short(payload: AnalyzeRequest):
             answers_text=answers_text,
         )
         text = generate_short_text(text_prompt, payload.lang)
-        run_id = uuid.uuid4()
         async with SessionLocal() as session:
-            session.add(
-                Run(
-                    id=run_id,
-                    name=payload.name,
-                    lang=payload.lang,
-                    gender=payload.gender or "unspecified",
-                )
-            )
-            session.add_all(
-                [
-                    RunAnswer(
-                        run_id=run_id,
-                        question_id=answer.questionId,
-                        answer=answer.answer,
+            async with session.begin():
+                run_id = uuid.UUID(
+                    await ensure_run_and_answers(
+                        session,
+                        run_id=requested_run_id,
+                        payload=payload,
+                        normalized_answers=normalized_answers,
                     )
-                    for answer in normalized_answers
-                ]
-            )
+                )
             session.add(
                 ShortResultORM(
                     run_id=run_id,
@@ -509,7 +536,7 @@ async def analyze_short(payload: AnalyzeRequest):
                     text=text,
                 )
             )
-            await session.commit()
+            print(f"💾 DB: saved short_result run_id={run_id}")
 
         return {
             "type": "short",
@@ -619,10 +646,11 @@ def analyze(payload: AnalyzeRequest):
 @app.post("/analyze/full", response_model=FullResponse)
 async def analyze_full(payload: AnalyzeRequest):
     try:
+        requested_run_id = uuid.UUID(payload.runId) if payload.runId else uuid.uuid4()
         print("📥 FULL payload:", payload)
         print(
             "✅ FULL parsed:",
-            f"lang={payload.lang}, gender={payload.gender}, answers={len(payload.answers)}",
+            f"lang={payload.lang}, gender={payload.gender}, answers={len(payload.answers)}, run_id={requested_run_id}",
         )
 
         normalized_answers = normalize_answers(payload.answers)
@@ -677,33 +705,23 @@ async def analyze_full(payload: AnalyzeRequest):
 
         text = run_full_analysis(prompt, payload.lang)
 
-        run_id = uuid.uuid4()
         async with SessionLocal() as session:
-            session.add(
-                Run(
-                    id=run_id,
-                    name=payload.name,
-                    lang=payload.lang,
-                    gender=payload.gender or "unspecified",
-                )
-            )
-            session.add_all(
-                [
-                    RunAnswer(
-                        run_id=run_id,
-                        question_id=answer.questionId,
-                        answer=answer.answer,
+            async with session.begin():
+                run_id = uuid.UUID(
+                    await ensure_run_and_answers(
+                        session,
+                        run_id=requested_run_id,
+                        payload=payload,
+                        normalized_answers=normalized_answers,
                     )
-                    for answer in normalized_answers
-                ]
-            )
-            session.add(
-                FullResultORM(
-                    run_id=run_id,
-                    text=text,
                 )
-            )
-            await session.commit()
+                session.add(
+                    FullResultORM(
+                        run_id=run_id,
+                        text=text,
+                    )
+                )
+            print(f"💾 DB: saved full_result run_id={run_id}")
 
         return {
             "type": "full",
