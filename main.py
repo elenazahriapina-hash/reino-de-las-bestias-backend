@@ -75,19 +75,6 @@ class ShortResponse(BaseModel):
     result: ShortResult
 
 
-class FullPayload(BaseModel):
-    runId: str
-    name: str
-    lang: str
-    gender: Optional[str] = None
-    animal: str  # EN-код: Wolf, Owl и т.д.
-    element: str  # Воздух / Вода / Огонь / Земля
-    answers: Union[List[TestAnswer], Dict[str, str]]
-    lockedAnimal: Optional[str] = None
-    lockedElement: Optional[str] = None
-    lockedGenderForm: Optional[str] = None
-
-
 class FullResult(BaseModel):
     runId: str
     text: str
@@ -661,14 +648,9 @@ def analyze(payload: AnalyzeRequest):
 
 
 @app.post("/analyze/full", response_model=FullResponse)
-async def analyze_full(payload: FullPayload):
+async def analyze_full(payload: TestPayload):
     try:
         print("📥 FULL payload:", payload)
-
-        try:
-            run_uuid = uuid.UUID(payload.runId)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid runId")
 
         normalized_answers = normalize_answers(payload.answers)
         answers_text = build_answers_text(normalized_answers)
@@ -679,13 +661,21 @@ async def analyze_full(payload: FullPayload):
             payload.lockedGenderForm,
             payload.lang,
         )
-        animal_code = payload.animal
-        element_code = payload.element
-        gender_form = payload.gender
-        if locked_codes is not None:
-            animal_code = locked_codes["animal"]
-            element_code = locked_codes["element"]
-            gender_form = locked_codes["genderForm"]
+        if locked_codes is None:
+            locked_codes = run_short_analysis(
+                prompt=f"""
+Имя: {payload.name}
+Язык: {payload.lang}
+Пол: {payload.gender or "unspecified"}
+
+Ответы пользователя:
+{answers_text}
+""".strip(),
+                lang=payload.lang,
+            )
+        animal_code = locked_codes["animal"]
+        element_code = locked_codes["element"]
+        gender_form = locked_codes["genderForm"]
 
         animal_display = get_animal_display_name(
             animal_code=animal_code,
@@ -714,10 +704,29 @@ async def analyze_full(payload: FullPayload):
 
         text = run_full_analysis(prompt, payload.lang)
 
+        run_id = uuid.uuid4()
         async with SessionLocal() as session:
             session.add(
+                Run(
+                    id=run_id,
+                    name=payload.name,
+                    lang=payload.lang,
+                    gender=payload.gender or "unspecified",
+                )
+            )
+            session.add_all(
+                [
+                    RunAnswer(
+                        run_id=run_id,
+                        question_id=answer.questionId,
+                        answer=answer.answer,
+                    )
+                    for answer in normalized_answers
+                ]
+            )
+            session.add(
                 FullResultORM(
-                    run_id=run_uuid,
+                    run_id=run_id,
                     text=text,
                 )
             )
@@ -725,7 +734,7 @@ async def analyze_full(payload: FullPayload):
 
         return {
             "type": "full",
-            "result": {"runId": payload.runId, "text": text},
+            "result": {"runId": str(run_id), "text": text},
         }
 
     except HTTPException:
