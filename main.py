@@ -9,8 +9,7 @@ from sqlalchemy import text as sql_text
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import re
-from typing import Dict, List, Optional, Union
+from typing import Optional
 from ai import (
     ALLOWED_ANIMALS,
     ALLOWED_ELEMENTS,
@@ -27,6 +26,7 @@ from utils_animals import (
     get_element_display_name,
     ELEMENT_LABELS,
 )
+from schemas import AnalyzeRequest, TestAnswer
 
 app = FastAPI()
 
@@ -47,21 +47,6 @@ app.add_middleware(
 )
 
 
-class TestAnswer(BaseModel):
-    questionId: int
-    answer: str
-
-
-class TestPayload(BaseModel):
-    name: str
-    lang: str
-    gender: Optional[str] = None
-    answers: Union[List[TestAnswer], Dict[str, str]]
-    lockedAnimal: Optional[str] = None
-    lockedElement: Optional[str] = None
-    lockedGenderForm: Optional[str] = None
-
-
 class ShortResult(BaseModel):
     runId: str
     animal: str  # EN code
@@ -76,20 +61,16 @@ class ShortResponse(BaseModel):
 
 
 class FullResult(BaseModel):
-    runId: str
+    animal: Optional[str] = None
+    element: Optional[str] = None
+    genderForm: Optional[str] = None
     text: str
+    runId: Optional[str] = None
 
 
 class FullResponse(BaseModel):
     type: str
     result: FullResult
-
-
-class AnalyzeRequest(BaseModel):
-    name: str
-    lang: str
-    gender: Optional[str] = None
-    answers: List[TestAnswer]
 
 
 class AnalyzeResult(BaseModel):
@@ -106,7 +87,6 @@ class AnalyzeResponse(BaseModel):
 
 
 # -------------------- PROMPT BUILDERS --------------------
-ANSWER_KEY_RE = re.compile(r"^answer_(\d+)$")
 
 SHORT_PROMPT_LABELS = {
     "ru": {
@@ -311,7 +291,7 @@ def resolve_locked_codes(
     locked_element: Optional[str],
     locked_gender_form: Optional[str],
     lang: str,
-) -> Optional[Dict[str, str]]:
+) -> Optional[dict[str, str]]:
     if not (locked_animal and locked_element and locked_gender_form):
         return None
     if locked_animal not in ALLOWED_ANIMALS:
@@ -447,27 +427,19 @@ def build_full_prompt(
 # -------------------- ENDPOINT --------------------
 
 
-def normalize_answers(
-    answers: Union[List[TestAnswer], Dict[str, str]],
-) -> List[TestAnswer]:
-    if isinstance(answers, list):
-        return answers
-    normalized: List[TestAnswer] = []
-    for key, value in answers.items():
-        match = ANSWER_KEY_RE.match(key)
-        if not match or value is None:
-            continue
-        normalized.append(TestAnswer(questionId=int(match.group(1)), answer=str(value)))
-    normalized.sort(key=lambda item: item.questionId)
-    return normalized
+def normalize_answers(answers: List[TestAnswer]) -> List[TestAnswer]:
+    return answers
 
 
 @app.post("/analyze/short", response_model=ShortResponse)
-async def analyze_short(payload: TestPayload):
+async def analyze_short(payload: AnalyzeRequest):
     try:
         print("📥 SHORT payload:", payload)
+        print(
+            "✅ SHORT parsed:",
+            f"lang={payload.lang}, gender={payload.gender}, answers={len(payload.answers)}",
+        )
 
-        answers_text = build_answers_text(payload.answers)
         normalized_answers = normalize_answers(payload.answers)
         answers_text = build_answers_text(normalized_answers)
 
@@ -648,9 +620,13 @@ def analyze(payload: AnalyzeRequest):
 
 
 @app.post("/analyze/full", response_model=FullResponse)
-async def analyze_full(payload: TestPayload):
+async def analyze_full(payload: AnalyzeRequest):
     try:
         print("📥 FULL payload:", payload)
+        print(
+            "✅ FULL parsed:",
+            f"lang={payload.lang}, gender={payload.gender}, answers={len(payload.answers)}",
+        )
 
         normalized_answers = normalize_answers(payload.answers)
         answers_text = build_answers_text(normalized_answers)
@@ -734,7 +710,13 @@ async def analyze_full(payload: TestPayload):
 
         return {
             "type": "full",
-            "result": {"runId": str(run_id), "text": text},
+            "result": {
+                "runId": str(run_id),
+                "animal": animal_code,
+                "element": element_code,
+                "genderForm": gender_form,
+                "text": text,
+            },
         }
 
     except HTTPException:
@@ -758,10 +740,18 @@ async def get_full_result(runId: str):
     if result is None:
         raise HTTPException(status_code=404, detail="Full result not found")
 
-    return {
-        "type": "full",
-        "result": {"runId": str(result.run_id), "text": result.text},
-    }
+    return (
+        {
+            "type": "full",
+            "result": {
+                "runId": str(result.run_id),
+                "animal": None,
+                "element": None,
+                "genderForm": None,
+                "text": result.text,
+            },
+        },
+    )
 
 
 @app.get("/health/db")
