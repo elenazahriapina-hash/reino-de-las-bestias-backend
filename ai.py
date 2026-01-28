@@ -2,7 +2,6 @@ from openai import OpenAI
 import os
 import json
 import re
-from typing import Dict
 
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
@@ -49,7 +48,7 @@ ALLOWED_ELEMENTS = {"Воздух", "Вода", "Огонь", "Земля"}
 ALLOWED_GENDERS = {"male", "female", "unspecified"}
 
 
-def _extract_json(text: str) -> Dict:
+def _extract_json(text: str) -> dict:
 
     try:
         return json.loads(text)

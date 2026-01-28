@@ -9,7 +9,6 @@ from sqlalchemy import text as sql_text
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
 from ai import (
     ALLOWED_ANIMALS,
     ALLOWED_ELEMENTS,
@@ -61,11 +60,11 @@ class ShortResponse(BaseModel):
 
 
 class FullResult(BaseModel):
-    animal: Optional[str] = None
-    element: Optional[str] = None
-    genderForm: Optional[str] = None
+    animal: str | None = None
+    element: str | None = None
+    genderForm: str | None = None
     text: str
-    runId: Optional[str] = None
+    runId: str | None = None
 
 
 class FullResponse(BaseModel):
@@ -171,7 +170,7 @@ FULL_PROMPT_LABELS = {
 }
 
 
-def build_answers_text(answers: List[TestAnswer]) -> str:
+def build_answers_text(answers: list[TestAnswer]) -> str:
     return "\n".join(f"Q{a.questionId}: {a.answer}" for a in answers if a.answer)
 
 
@@ -272,7 +271,7 @@ pt — португальский
 """.strip()
 
 
-def normalize_locked_element(locked_element: str, lang: str) -> Optional[str]:
+def normalize_locked_element(locked_element: str, lang: str) -> str | None:
     if locked_element in ALLOWED_ELEMENTS:
         return locked_element
     for label_map in (ELEMENT_LABELS.get(lang, {}), ELEMENT_LABELS["ru"]):
@@ -287,11 +286,11 @@ def normalize_locked_element(locked_element: str, lang: str) -> Optional[str]:
 
 
 def resolve_locked_codes(
-    locked_animal: Optional[str],
-    locked_element: Optional[str],
-    locked_gender_form: Optional[str],
+    locked_animal: str | None,
+    locked_element: str | None,
+    locked_gender_form: str | None,
     lang: str,
-) -> Optional[dict[str, str]]:
+) -> dict[str, str] | None:
     if not (locked_animal and locked_element and locked_gender_form):
         return None
     if locked_animal not in ALLOWED_ANIMALS:
@@ -311,7 +310,7 @@ def resolve_locked_codes(
 def build_full_prompt(
     name: str,
     lang: str,
-    gender: Optional[str],
+    gender: str | None,
     animal_display: str,
     element_label: str,
     element_display: str,
@@ -425,9 +424,7 @@ def build_full_prompt(
 
 
 # -------------------- ENDPOINT --------------------
-
-
-def normalize_answers(answers: List[TestAnswer]) -> List[TestAnswer]:
+def normalize_answers(answers: list[TestAnswer]) -> list[TestAnswer]:
     return answers
 
 
