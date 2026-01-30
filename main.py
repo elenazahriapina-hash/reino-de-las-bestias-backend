@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-from sqlalchemy import delete, text as sql_text
+from sqlalchemy import delete, select, text as sql_text
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ from utils_animals import (
     get_element_display_name,
     ELEMENT_LABELS,
 )
-from schemas import AnalyzeRequest, TestAnswer
+from schemas import AnalyzeRequest, FullRequest, FullResponse, ShortResponse, TestAnswer
 
 app = FastAPI()
 
@@ -44,32 +44,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class ShortResult(BaseModel):
-    runId: str
-    animal: str  # EN code
-    element: str  # RU: Воздух/Вода/Огонь/Земля
-    genderForm: str  # male/female/unspecified
-    text: str
-
-
-class ShortResponse(BaseModel):
-    type: str
-    result: ShortResult
-
-
-class FullResult(BaseModel):
-    animal: str | None = None
-    element: str | None = None
-    genderForm: str | None = None
-    text: str
-    runId: str | None = None
-
-
-class FullResponse(BaseModel):
-    type: str
-    result: FullResult
 
 
 class AnalyzeResult(BaseModel):
@@ -324,6 +298,8 @@ def build_full_prompt(
 в системе «24 зверя × 4 стихии».
 
 Архетип зверя и стихия ЗАДАНЫ и НЕ ПЕРЕСМАТРИВАЮТСЯ.
+Use ONLY this animal: {animal_display}
+Use ONLY this element: {element_label}
 
 Архетип: {animal_display}
 Стихия: {element_label}
@@ -538,8 +514,9 @@ async def analyze_short(payload: AnalyzeRequest):
             )
             print(f"💾 DB: saved short_result run_id={run_id}")
 
-        return {
+        response = {
             "type": "short",
+            "result_id": str(run_id),
             "result": {
                 "runId": str(run_id),
                 "animal": codes["animal"],
@@ -548,6 +525,13 @@ async def analyze_short(payload: AnalyzeRequest):
                 "text": text,
             },
         }
+        print(
+            "📤 SHORT response keys:",
+            list(response.keys()),
+            "result keys:",
+            list(response["result"].keys()),
+        )
+        return response
 
     except HTTPException:
         raise
@@ -572,6 +556,7 @@ async def get_short_result(runId: str):
 
     return {
         "type": "short",
+        "result_id": str(result.run_id),
         "result": {
             "runId": str(result.run_id),
             "animal": result.animal,
@@ -643,8 +628,7 @@ def analyze(payload: AnalyzeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/analyze/full", response_model=FullResponse)
-async def analyze_full(payload: AnalyzeRequest):
+async def analyze_full_legacy(payload: AnalyzeRequest) -> dict:
     try:
         requested_run_id = uuid.UUID(payload.runId) if payload.runId else uuid.uuid4()
         print("📥 FULL payload:", payload)
@@ -725,8 +709,8 @@ async def analyze_full(payload: AnalyzeRequest):
 
         return {
             "type": "full",
+            "result_id": str(run_id),
             "result": {
-                "runId": str(run_id),
                 "animal": animal_code,
                 "element": element_code,
                 "genderForm": gender_form,
@@ -742,6 +726,109 @@ async def analyze_full(payload: AnalyzeRequest):
         raise HTTPException(status_code=500, detail="Ошибка анализа")
 
 
+@app.post("/analyze/full", response_model=FullResponse)
+async def analyze_full(payload: FullRequest):
+    try:
+        print("📥 FULL payload result_id:", payload.result_id)
+        try:
+            run_uuid = uuid.UUID(payload.result_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="Invalid result_id format"
+            ) from exc
+
+        async with SessionLocal() as session:
+            run = await session.get(Run, run_uuid)
+            short_result = await session.get(ShortResultORM, run_uuid)
+            answers_query = await session.execute(
+                select(RunAnswer)
+                .where(RunAnswer.run_id == run_uuid)
+                .order_by(RunAnswer.question_id)
+            )
+            answers_rows = answers_query.scalars().all()
+            print(
+                "🔎 FULL lookup:",
+                f"run_found={run is not None}",
+                f"short_result_found={short_result is not None}",
+                f"answers_count={len(answers_rows)}",
+            )
+
+            if run is None or short_result is None:
+                raise HTTPException(
+                    status_code=404, detail="Full result source not found"
+                )
+
+            answers = [
+                TestAnswer(questionId=row.question_id, answer=row.answer)
+                for row in answers_rows
+            ]
+            answers_text = build_answers_text(answers)
+
+            animal_code = short_result.animal
+            element_code = short_result.element
+            gender_form = short_result.gender_form
+
+            animal_display = get_animal_display_name(
+                animal_code=animal_code,
+                lang=run.lang,
+                gender=gender_form,
+            )
+            element_label = get_element_display_name(
+                element_code=element_code,
+                lang=run.lang,
+            )
+            element_display = get_element_display_name(
+                element_code=element_code,
+                lang=run.lang,
+                ru_case="genitive_for_archetype_line",
+            )
+
+            prompt = build_full_prompt(
+                name=run.name,
+                lang=run.lang,
+                gender=gender_form,
+                animal_display=animal_display,
+                element_label=element_label,
+                element_display=element_display,
+                answers_text=answers_text,
+            )
+            text = run_full_analysis(prompt, run.lang)
+
+            await session.execute(
+                delete(FullResultORM).where(FullResultORM.run_id == run_uuid)
+            )
+            session.add(
+                FullResultORM(
+                    run_id=run_uuid,
+                    text=text,
+                )
+            )
+            await session.commit()
+            print(f"💾 DB: saved full_result run_id={run_uuid}")
+
+        return {
+            "type": "full",
+            "result_id": str(run_uuid),
+            "result": {
+                "animal": animal_code,
+                "element": element_code,
+                "genderForm": gender_form,
+                "text": text,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ FULL ANALYSIS ERROR:", e)
+        raise HTTPException(status_code=500, detail="Ошибка анализа")
+
+
+@app.post("/analyze/full/legacy", response_model=FullResponse)
+async def analyze_full_legacy_endpoint(payload: AnalyzeRequest):
+    return await analyze_full_legacy(payload)
+
+
 @app.get("/result/full/{runId}", response_model=FullResponse)
 async def get_full_result(runId: str):
     try:
@@ -751,18 +838,19 @@ async def get_full_result(runId: str):
 
     async with SessionLocal() as session:
         result = await session.get(FullResultORM, run_uuid)
+        short_result = await session.get(ShortResultORM, run_uuid)
 
-    if result is None:
+    if result is None or short_result is None:
         raise HTTPException(status_code=404, detail="Full result not found")
 
     return (
         {
             "type": "full",
+            "result_id": str(result.run_id),
             "result": {
-                "runId": str(result.run_id),
-                "animal": None,
-                "element": None,
-                "genderForm": None,
+                "animal": short_result.animal,
+                "element": short_result.element,
+                "genderForm": short_result.gender_form,
                 "text": result.text,
             },
         },
