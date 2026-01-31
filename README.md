@@ -6,7 +6,6 @@ Provides API endpoints for:
 - processing user answers
 - archetype (animal + element) analysis
 - generating short textual interpretations
-- generating full textual interpretations based on stored short results
 
 ## 🧠 Stack
 - Python
@@ -20,69 +19,34 @@ Provides API endpoints for:
 pip install -r requirements.txt
 ```
 
-## 🔌 API (short → full flow)
-
-### 1) Generate a short result (returns `result_id`)
+2. Start Postgres (default credentials):
 ```bash
-curl -X POST http://localhost:8000/analyze/short \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Ada",
-    "lang": "en",
-    "gender": "female",
-    "answers": [
-      { "questionId": 1, "answer": "I like to plan ahead." }
-    ]
-  }'
+docker compose up -d
 ```
 
-Response (example):
-```json
-{
-  "type": "short",
-  "result_id": "3c0a2e8b-0aa4-4a1b-9ce6-2a5a8cf3c6b7",
-  "result": {
-    "runId": "3c0a2e8b-0aa4-4a1b-9ce6-2a5a8cf3c6b7",
-    "animal": "turtle",
-    "element": "water",
-    "genderForm": "female",
-    "text": "..."
-  }
-}
-```
-
-### 2) Generate a full result (by `result_id`)
+3. Create tables:
 ```bash
-curl -X POST http://localhost:8000/analyze/full \
-  -H "Content-Type: application/json" \
-  -d '{ "result_id": "3c0a2e8b-0aa4-4a1b-9ce6-2a5a8cf3c6b7" }'
+python create_tables.py
 ```
 
-Response (example):
-```json
-{
-  "type": "full",
-  "result_id": "3c0a2e8b-0aa4-4a1b-9ce6-2a5a8cf3c6b7",
-  "result": {
-    "animal": "turtle",
-    "element": "water",
-    "genderForm": "female",
-    "text": "..."
-  }
-}
-```
-
-### Legacy full endpoint
-If you still need to send `name/lang/answers` directly, use:
+4. Run the API:
 ```bash
-curl -X POST http://localhost:8000/analyze/full/legacy \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Ada",
-    "lang": "en",
-    "gender": "female",
-    "answers": [
-      { "questionId": 1, "answer": "I like to plan ahead." }
-    ]
-  }'
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
 ```
+
+## 🗄️ Database
+
+Default connection string (from `.env`):
+```
+postgresql+asyncpg://reino:reino_pass@localhost:5432/reino
+```
+
+**psql quick connect:**
+```bash
+psql postgresql://reino:reino_pass@localhost:5432/reino
+```
+
+## 🛠️ Troubleshooting
+
+* **`/analyze/short` returns 200 but `short_results` is empty:** ensure Postgres is running and `create_tables.py` has been run. Check that `.env` points to the same database as your `psql` session.
+* **`/analyze/full` fails with "short_result missing":** the short result was not persisted for the run. Verify `short_results` contains a row for the given `result_id` and re-run `/analyze/short` to regenerate it.
