@@ -51,7 +51,15 @@ If you override credentials, update both `.env` and your `psql` connection strin
 ## 🛠️ Troubleshooting
 
 * **`/analyze/short` returns 200 but `short_results` is empty:** confirm Postgres is running and `create_tables.py` has been run, then check that `.env` points to the same database as your `psql` session. The response `result_id` should always exist as a row in `short_results`.
+```sql
+  select * from short_results where run_id = '<result_id>';
+  ```
 * **`/analyze/full` fails with "short_result missing":** this indicates a data integrity issue (the run exists without a short result). Verify `short_results` contains a row for the given `result_id` and re-run `/analyze/short` to regenerate it.
+```sql
+  select * from runs where id = '<result_id>';
+  select * from short_results where run_id = '<result_id>';
+  select * from run_answers where run_id = '<result_id>';
+  ```
 * **`/analyze/full` with invalid `result_id`:** ensure you pass a UUID string in the payload `{ "result_id": "<uuid>" }`.
 main.py
 main.py

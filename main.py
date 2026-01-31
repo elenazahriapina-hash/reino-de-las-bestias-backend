@@ -441,6 +441,37 @@ async def ensure_run_and_answers(
     return str(run_id)
 
 
+async def upsert_short_result(
+    session,
+    *,
+    run_id: uuid.UUID,
+    animal: str,
+    element: str,
+    gender_form: str,
+    text: str,
+) -> None:
+    stmt = (
+        insert(ShortResultORM)
+        .values(
+            run_id=run_id,
+            animal=animal,
+            element=element,
+            gender_form=gender_form,
+            text=text,
+        )
+        .on_conflict_do_update(
+            index_elements=[ShortResultORM.run_id],
+            set_={
+                "animal": animal,
+                "element": element,
+                "gender_form": gender_form,
+                "text": text,
+            },
+        )
+    )
+    await session.execute(stmt)
+
+
 @app.post("/analyze/short", response_model=ShortResponse)
 async def analyze_short(payload: AnalyzeRequest):
     try:
@@ -504,39 +535,25 @@ async def analyze_short(payload: AnalyzeRequest):
                         normalized_answers=normalized_answers,
                     )
                 )
-                short_result_stmt = (
-                    insert(ShortResultORM)
-                    .values(
-                        run_id=run_id,
-                        animal=codes["animal"],
-                        element=codes["element"],
-                        gender_form=codes["genderForm"],
-                        text=text,
-                    )
-                    .on_conflict_do_update(
-                        index_elements=[ShortResultORM.run_id],
-                        set_={
-                            "animal": codes["animal"],
-                            "element": codes["element"],
-                            "gender_form": codes["genderForm"],
-                            "text": text,
-                        },
-                    )
+                await upsert_short_result(
+                    session,
+                    run_id=run_id,
+                    animal=codes["animal"],
+                    element=codes["element"],
+                    gender_form=codes["genderForm"],
+                    text=text,
                 )
-            await session.execute(short_result_stmt)
-
             saved = await session.get(ShortResultORM, run_id)
             if saved is None:
                 raise HTTPException(
                     status_code=500, detail="short_result not persisted"
                 )
             print(
-                "💾 DB: saved short_result",
+                "✅ DB verify short_result ok",
                 f"run_id={run_id}",
                 f"animal={saved.animal}",
                 f"element={saved.element}",
                 f"gender_form={saved.gender_form}",
-                "verify_ok=True",
             )
         response = {
             "type": "short",
@@ -819,16 +836,16 @@ async def analyze_full(payload: FullRequest):
             )
             text = run_full_analysis(prompt, run.lang)
 
-            await session.execute(
-                delete(FullResultORM).where(FullResultORM.run_id == run_uuid)
-            )
-            session.add(
-                FullResultORM(
-                    run_id=run_uuid,
-                    text=text,
+            async with session.begin():
+                full_stmt = (
+                    insert(FullResultORM)
+                    .values(run_id=run_uuid, text=text)
+                    .on_conflict_do_update(
+                        index_elements=[FullResultORM.run_id],
+                        set_={"text": text},
+                    )
                 )
-            )
-            await session.commit()
+            await session.execute(full_stmt)
             print(f"💾 DB: saved full_result run_id={run_uuid}")
 
         return {
