@@ -20,7 +20,6 @@ class AnalyzeRequest(BaseModel):
 
 
 class ShortResult(BaseModel):
-    runId: str | None = None
     animal: str
     element: str
     genderForm: str

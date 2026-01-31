@@ -46,7 +46,12 @@ postgresql+asyncpg://reino:reino_pass@localhost:5432/reino
 psql postgresql://reino:reino_pass@localhost:5432/reino
 ```
 
+If you override credentials, update both `.env` and your `psql` connection string so they point at the same database.
+
 ## 🛠️ Troubleshooting
 
-* **`/analyze/short` returns 200 but `short_results` is empty:** ensure Postgres is running and `create_tables.py` has been run. Check that `.env` points to the same database as your `psql` session.
-* **`/analyze/full` fails with "short_result missing":** the short result was not persisted for the run. Verify `short_results` contains a row for the given `result_id` and re-run `/analyze/short` to regenerate it.
+* **`/analyze/short` returns 200 but `short_results` is empty:** confirm Postgres is running and `create_tables.py` has been run, then check that `.env` points to the same database as your `psql` session. The response `result_id` should always exist as a row in `short_results`.
+* **`/analyze/full` fails with "short_result missing":** this indicates a data integrity issue (the run exists without a short result). Verify `short_results` contains a row for the given `result_id` and re-run `/analyze/short` to regenerate it.
+* **`/analyze/full` with invalid `result_id`:** ensure you pass a UUID string in the payload `{ "result_id": "<uuid>" }`.
+main.py
+main.py

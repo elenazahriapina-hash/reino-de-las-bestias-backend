@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from sqlalchemy import delete, select, text as sql_text
+from sqlalchemy.dialects.postgresql import insert
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -503,22 +504,44 @@ async def analyze_short(payload: AnalyzeRequest):
                         normalized_answers=normalized_answers,
                     )
                 )
-            session.add(
-                ShortResultORM(
-                    run_id=run_id,
-                    animal=codes["animal"],
-                    element=codes["element"],
-                    gender_form=codes["genderForm"],
-                    text=text,
+                short_result_stmt = (
+                    insert(ShortResultORM)
+                    .values(
+                        run_id=run_id,
+                        animal=codes["animal"],
+                        element=codes["element"],
+                        gender_form=codes["genderForm"],
+                        text=text,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[ShortResultORM.run_id],
+                        set_={
+                            "animal": codes["animal"],
+                            "element": codes["element"],
+                            "gender_form": codes["genderForm"],
+                            "text": text,
+                        },
+                    )
                 )
-            )
-            print(f"💾 DB: saved short_result run_id={run_id}")
+            await session.execute(short_result_stmt)
 
+            saved = await session.get(ShortResultORM, run_id)
+            if saved is None:
+                raise HTTPException(
+                    status_code=500, detail="short_result not persisted"
+                )
+            print(
+                "💾 DB: saved short_result",
+                f"run_id={run_id}",
+                f"animal={saved.animal}",
+                f"element={saved.element}",
+                f"gender_form={saved.gender_form}",
+                "verify_ok=True",
+            )
         response = {
             "type": "short",
             "result_id": str(run_id),
             "result": {
-                "runId": str(run_id),
                 "animal": codes["animal"],
                 "element": codes["element"],  # ✅ RU: Огонь/Вода/Воздух/Земля
                 "genderForm": codes["genderForm"],
@@ -558,7 +581,6 @@ async def get_short_result(runId: str):
         "type": "short",
         "result_id": str(result.run_id),
         "result": {
-            "runId": str(result.run_id),
             "animal": result.animal,
             "element": result.element,
             "genderForm": result.gender_form,
@@ -753,9 +775,12 @@ async def analyze_full(payload: FullRequest):
                 f"answers_count={len(answers_rows)}",
             )
 
-            if run is None or short_result is None:
+            if run is None:
+                raise HTTPException(status_code=404, detail="Run not found")
+            if short_result is None:
                 raise HTTPException(
-                    status_code=404, detail="Full result source not found"
+                    status_code=500,
+                    detail="short_result missing for existing run",
                 )
 
             answers = [
