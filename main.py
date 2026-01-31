@@ -777,66 +777,68 @@ async def analyze_full(payload: FullRequest):
             ) from exc
 
         async with SessionLocal() as session:
-            run = await session.get(Run, run_uuid)
-            short_result = await session.get(ShortResultORM, run_uuid)
-            answers_query = await session.execute(
-                select(RunAnswer)
-                .where(RunAnswer.run_id == run_uuid)
-                .order_by(RunAnswer.question_id)
-            )
-            answers_rows = answers_query.scalars().all()
-            print(
-                "🔎 FULL lookup:",
-                f"run_found={run is not None}",
-                f"short_result_found={short_result is not None}",
-                f"answers_count={len(answers_rows)}",
-            )
-
-            if run is None:
-                raise HTTPException(status_code=404, detail="Run not found")
-            if short_result is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail="short_result missing for existing run",
+            async with session.begin():
+                run = await session.get(Run, run_uuid)
+                short_result = await session.get(ShortResultORM, run_uuid)
+                answers_query = await session.execute(
+                    select(RunAnswer)
+                    .where(RunAnswer.run_id == run_uuid)
+                    .order_by(RunAnswer.question_id)
+                )
+                answers_rows = answers_query.scalars().all()
+                print(
+                    "🔎 FULL lookup:",
+                    f"run_found={run is not None}",
+                    f"short_result_found={short_result is not None}",
+                    f"answers_count={len(answers_rows)}",
                 )
 
-            answers = [
-                TestAnswer(questionId=row.question_id, answer=row.answer)
-                for row in answers_rows
-            ]
-            answers_text = build_answers_text(answers)
+                if run is None:
+                    raise HTTPException(status_code=404, detail="Run not found")
+                if short_result is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="short_result missing for existing run",
+                    )
 
-            animal_code = short_result.animal
-            element_code = short_result.element
-            gender_form = short_result.gender_form
+                answers = [
+                    TestAnswer(questionId=row.question_id, answer=row.answer)
+                    for row in answers_rows
+                ]
+                answers_text = build_answers_text(answers)
 
-            animal_display = get_animal_display_name(
-                animal_code=animal_code,
-                lang=run.lang,
-                gender=gender_form,
-            )
-            element_label = get_element_display_name(
-                element_code=element_code,
-                lang=run.lang,
-            )
-            element_display = get_element_display_name(
-                element_code=element_code,
-                lang=run.lang,
-                ru_case="genitive_for_archetype_line",
-            )
+                animal_code = short_result.animal
+                element_code = short_result.element
+                gender_form = short_result.gender_form
 
-            prompt = build_full_prompt(
-                name=run.name,
-                lang=run.lang,
-                gender=gender_form,
-                animal_display=animal_display,
-                element_label=element_label,
-                element_display=element_display,
-                answers_text=answers_text,
-            )
-            text = run_full_analysis(prompt, run.lang)
+                animal_display = get_animal_display_name(
+                    animal_code=animal_code,
+                    lang=run.lang,
+                    gender=gender_form,
+                )
+                element_label = get_element_display_name(
+                    element_code=element_code,
+                    lang=run.lang,
+                )
+                element_display = get_element_display_name(
+                    element_code=element_code,
+                    lang=run.lang,
+                    ru_case="genitive_for_archetype_line",
+                )
 
-            async with session.begin():
+                prompt = build_full_prompt(
+                    name=run.name,
+                    lang=run.lang,
+                    gender=gender_form,
+                    animal_display=animal_display,
+                    element_label=element_label,
+                    element_display=element_display,
+                    answers_text=answers_text,
+                )
+                text = run_full_analysis(prompt, run.lang)
+
+                print("FULL tx active before save:", session.in_transaction())
+
                 full_stmt = (
                     insert(FullResultORM)
                     .values(run_id=run_uuid, text=text)
@@ -845,8 +847,10 @@ async def analyze_full(payload: FullRequest):
                         set_={"text": text},
                     )
                 )
-            await session.execute(full_stmt)
-            print(f"💾 DB: saved full_result run_id={run_uuid}")
+                await session.execute(full_stmt)
+                saved_full = await session.get(FullResultORM, run_uuid)
+                print("FULL verify saved:", saved_full is not None)
+                print(f"💾 DB: saved full_result run_id={run_uuid}")
 
         return {
             "type": "full",
