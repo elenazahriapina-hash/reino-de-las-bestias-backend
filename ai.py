@@ -47,6 +47,21 @@ ALLOWED_ANIMALS = {
 ALLOWED_ELEMENTS = {"Воздух", "Вода", "Огонь", "Земля"}
 ALLOWED_GENDERS = {"male", "female", "unspecified"}
 
+COMPAT_PROMPT_VERSION = "compat_master_v1_2_universal"
+
+COMPAT_SYSTEM_PROMPT = """
+Ты — аналитическая модель совместимости архетипов в системе «24 зверя × 4 стихии».
+Твоя задача — создать универсальный отчёт совместимости без указания типа взаимодействия.
+
+Ключевые правила:
+- Анализ универсальный (подходит для любых контекстов).
+- Не упоминай «романтика», «дружба», «бизнес» и любые типы взаимодействия.
+- Не упоминай личности, имена, email, telegram, личные идентификаторы.
+- Не придумывай факты, которых нет в исходных данных.
+- Тон взрослый, спокойный, уверенный.
+- Структура должна быть логичной, цельной и понятной.
+""".strip()
+
 
 def _extract_json(text: str) -> dict:
 
@@ -174,6 +189,19 @@ def run_full_analysis(prompt: str, lang: str) -> str:
             {"role": "user", "content": prompt},
         ],
         max_output_tokens=1200,  # достаточно для full-профиля
+    )
+
+    return (response.output_text or "").strip()
+
+
+def generate_compatibility_text(system_prompt: str, user_payload: str) -> str:
+    response = client.responses.create(
+        model="gpt-4.1",
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_payload},
+        ],
+        max_output_tokens=1200,
     )
 
     return (response.output_text or "").strip()

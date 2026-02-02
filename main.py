@@ -7,26 +7,57 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from sqlalchemy import delete, select, text as sql_text
 from sqlalchemy.dialects.postgresql import insert
-from fastapi import FastAPI, HTTPException
+from sqlalchemy.exc import IntegrityError
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ai import (
     ALLOWED_ANIMALS,
     ALLOWED_ELEMENTS,
     ALLOWED_GENDERS,
+    COMPAT_PROMPT_VERSION,
+    COMPAT_SYSTEM_PROMPT,
     run_short_analysis,
     generate_short_text,
     run_full_analysis,
+    generate_compatibility_text,
 )
 from db import SessionLocal, engine
-from models import Base, Run, RunAnswer, ShortResultORM, FullResultORM
+from models import (
+    Base,
+    Run,
+    RunAnswer,
+    ShortResultORM,
+    FullResultORM,
+    User,
+    UserResult,
+    CompatReport,
+    Invite,
+)
 from utils_animals import (
     build_image_key,
     get_animal_display_name,
     get_element_display_name,
     ELEMENT_LABELS,
+    get_animal_ru_name,
 )
-from schemas import AnalyzeRequest, FullRequest, FullResponse, ShortResponse, TestAnswer
+from schemas import (
+    AnalyzeRequest,
+    CompatibilityAcceptInviteRequest,
+    CompatibilityCheckRequest,
+    CompatibilityInviteRequest,
+    CompatibilityInviteResponse,
+    CompatibilityListResponse,
+    CompatibilityReportResponse,
+    FullRequest,
+    FullResponse,
+    LookupUserResponse,
+    RegisterRequest,
+    RegisterResponse,
+    ShortResponse,
+    TestAnswer,
+    UserResponse,
+)
 
 app = FastAPI()
 
@@ -405,6 +436,103 @@ def normalize_answers(answers: list[TestAnswer]) -> list[TestAnswer]:
     return answers
 
 
+LANGUAGE_NAMES = {
+    "ru": "Russian",
+    "en": "English",
+    "es": "Spanish",
+    "pt": "Portuguese",
+}
+
+
+def extract_auth_token(
+    authorization: str | None, x_auth_token: str | None
+) -> str | None:
+    if authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return parts[1]
+    if x_auth_token:
+        return x_auth_token
+    return None
+
+
+async def get_current_user(
+    session,
+    *,
+    authorization: str | None,
+    x_auth_token: str | None,
+) -> User:
+    token = extract_auth_token(authorization, x_auth_token)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing auth token")
+    user = await session.scalar(select(User).where(User.auth_token == token))
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth token")
+    return user
+
+
+def build_compatibility_payload(
+    *,
+    lang: str,
+    a_result: UserResult,
+    b_result: UserResult,
+) -> str:
+    language_name = LANGUAGE_NAMES.get(lang, "Russian")
+    a_animal_ru = get_animal_ru_name(a_result.animal_code, a_result.genderForm)
+    b_animal_ru = get_animal_ru_name(b_result.animal_code, b_result.genderForm)
+    a_full = a_result.full_text or "NOT_PROVIDED"
+    b_full = b_result.full_text or "NOT_PROVIDED"
+
+    return f"""
+Output language: {language_name} (langCode={lang})
+
+Person A
+Archetype: {a_animal_ru} {a_result.element_ru}
+SHORT:
+<<<SHORT_A
+{a_result.short_text}
+SHORT_A>>>
+FULL:
+<<<FULL_A
+{a_full}
+FULL_A>>>
+
+Person B
+Archetype: {b_animal_ru} {b_result.element_ru}
+SHORT:
+<<<SHORT_B
+{b_result.short_text}
+SHORT_B>>>
+FULL:
+<<<FULL_B
+{b_full}
+FULL_B>>>
+
+Rules:
+- If NOT_PROVIDED → do not invent facts
+- Analysis must be universal
+- Do not mention emails, telegrams, or identities
+""".strip()
+
+
+def serialize_report(
+    report: CompatReport, current_user_id: int
+) -> CompatibilityReportResponse:
+    other_user_id = (
+        report.user_high_id
+        if report.user_low_id == current_user_id
+        else report.user_low_id
+    )
+    return CompatibilityReportResponse(
+        id=report.id,
+        other_user_id=other_user_id,
+        prompt_version=report.prompt_version,
+        status=report.status,
+        text=report.text,
+        created_at=report.created_at,
+    )
+
+
 async def ensure_run_and_answers(
     session,
     *,
@@ -473,7 +601,11 @@ async def upsert_short_result(
 
 
 @app.post("/analyze/short", response_model=ShortResponse)
-async def analyze_short(payload: AnalyzeRequest):
+async def analyze_short(
+    payload: AnalyzeRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
     try:
         requested_run_id = uuid.UUID(payload.runId) if payload.runId else uuid.uuid4()
         print("📥 SHORT payload:", payload)
@@ -543,6 +675,28 @@ async def analyze_short(payload: AnalyzeRequest):
                     gender_form=codes["genderForm"],
                     text=text,
                 )
+                token = extract_auth_token(authorization, x_auth_token)
+                if token:
+                    user = await session.scalar(
+                        select(User).where(User.auth_token == token)
+                    )
+                    if user:
+                        existing_result = await session.get(UserResult, user.id)
+                        if existing_result:
+                            existing_result.animal_code = codes["animal"]
+                            existing_result.element_ru = codes["element"]
+                            existing_result.genderForm = codes["genderForm"]
+                            existing_result.short_text = text
+                        else:
+                            session.add(
+                                UserResult(
+                                    user_id=user.id,
+                                    animal_code=codes["animal"],
+                                    element_ru=codes["element"],
+                                    genderForm=codes["genderForm"],
+                                    short_text=text,
+                                )
+                            )
             saved = await session.get(ShortResultORM, run_id)
             if saved is None:
                 raise HTTPException(
@@ -766,7 +920,11 @@ async def analyze_full_legacy(payload: AnalyzeRequest) -> dict:
 
 
 @app.post("/analyze/full", response_model=FullResponse)
-async def analyze_full(payload: FullRequest):
+async def analyze_full(
+    payload: FullRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
     try:
         print("📥 FULL payload result_id:", payload.result_id)
         try:
@@ -851,6 +1009,30 @@ async def analyze_full(payload: FullRequest):
                 saved_full = await session.get(FullResultORM, run_uuid)
                 print("FULL verify saved:", saved_full is not None)
                 print(f"💾 DB: saved full_result run_id={run_uuid}")
+                token = extract_auth_token(authorization, x_auth_token)
+                if token:
+                    user = await session.scalar(
+                        select(User).where(User.auth_token == token)
+                    )
+                    if user:
+                        existing_result = await session.get(UserResult, user.id)
+                        if existing_result:
+                            existing_result.animal_code = animal_code
+                            existing_result.element_ru = element_code
+                            existing_result.genderForm = gender_form
+                            existing_result.short_text = short_result.text
+                            existing_result.full_text = text
+                        else:
+                            session.add(
+                                UserResult(
+                                    user_id=user.id,
+                                    animal_code=animal_code,
+                                    element_ru=element_code,
+                                    genderForm=gender_form,
+                                    short_text=short_result.text,
+                                    full_text=text,
+                                )
+                            )
 
         return {
             "type": "full",
@@ -873,6 +1055,441 @@ async def analyze_full(payload: FullRequest):
 @app.post("/analyze/full/legacy", response_model=FullResponse)
 async def analyze_full_legacy_endpoint(payload: AnalyzeRequest):
     return await analyze_full_legacy(payload)
+
+
+@app.post("/auth/register", response_model=RegisterResponse)
+async def register(payload: RegisterRequest):
+    if not payload.email and not payload.telegram:
+        raise HTTPException(status_code=400, detail="Email or telegram required")
+    async with SessionLocal() as session:
+        existing = await session.scalar(
+            select(User).where(
+                (User.email == payload.email) | (User.telegram == payload.telegram)
+            )
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="User already exists")
+        auth_token = uuid.uuid4().hex
+        user = User(
+            email=payload.email,
+            telegram=payload.telegram,
+            name=payload.name,
+            lang=payload.lang,
+            auth_token=auth_token,
+            has_full=False,
+            packs_bought=0,
+            compat_credits=1,
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+    return RegisterResponse(
+        id=user.id,
+        email=user.email,
+        telegram=user.telegram,
+        name=user.name,
+        lang=user.lang,
+        auth_token=user.auth_token,
+        has_full=user.has_full,
+        packs_bought=user.packs_bought,
+        compat_credits=user.compat_credits,
+        created_at=user.created_at,
+    )
+
+
+@app.get("/users/me", response_model=UserResponse)
+async def get_me(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        return UserResponse(
+            id=user.id,
+            email=user.email,
+            telegram=user.telegram,
+            name=user.name,
+            lang=user.lang,
+            has_full=user.has_full,
+            packs_bought=user.packs_bought,
+            compat_credits=user.compat_credits,
+            created_at=user.created_at,
+        )
+
+
+@app.get("/users/lookup", response_model=LookupUserResponse)
+async def lookup_user(
+    q: str,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    if not q:
+        raise HTTPException(status_code=400, detail="q is required")
+    async with SessionLocal() as session:
+        await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        user = await session.scalar(
+            select(User).where((User.email == q) | (User.telegram == q))
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return LookupUserResponse(id=user.id, name=user.name, lang=user.lang)
+
+
+@app.post("/purchase/full", response_model=UserResponse)
+async def purchase_full(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await get_current_user(
+                session, authorization=authorization, x_auth_token=x_auth_token
+            )
+            if not user.has_full:
+                user.has_full = True
+                user.compat_credits += 3
+        await session.refresh(user)
+        return UserResponse(
+            id=user.id,
+            email=user.email,
+            telegram=user.telegram,
+            name=user.name,
+            lang=user.lang,
+            has_full=user.has_full,
+            packs_bought=user.packs_bought,
+            compat_credits=user.compat_credits,
+            created_at=user.created_at,
+        )
+
+
+@app.post("/purchase/compat_pack", response_model=UserResponse)
+async def purchase_compat_pack(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await get_current_user(
+                session, authorization=authorization, x_auth_token=x_auth_token
+            )
+            user.packs_bought += 1
+            user.compat_credits += 3
+        await session.refresh(user)
+        return UserResponse(
+            id=user.id,
+            email=user.email,
+            telegram=user.telegram,
+            name=user.name,
+            lang=user.lang,
+            has_full=user.has_full,
+            packs_bought=user.packs_bought,
+            compat_credits=user.compat_credits,
+            created_at=user.created_at,
+        )
+
+
+@app.post("/compatibility/check", response_model=CompatibilityReportResponse)
+async def compatibility_check(
+    payload: CompatibilityCheckRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        if payload.requestId:
+            existing = await session.scalar(
+                select(CompatReport).where(
+                    CompatReport.request_id == payload.requestId,
+                    (CompatReport.user_low_id == user.id)
+                    | (CompatReport.user_high_id == user.id),
+                )
+            )
+            if existing:
+                return serialize_report(existing, user.id)
+        target = await session.get(User, payload.target_user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Target user not found")
+        if target.id == user.id:
+            raise HTTPException(status_code=400, detail="Cannot compare same user")
+
+        a_result = await session.get(UserResult, user.id)
+        b_result = await session.get(UserResult, target.id)
+        if not a_result or not b_result:
+            raise HTTPException(status_code=400, detail="Both users must have results")
+
+        user_low_id, user_high_id = sorted([user.id, target.id])
+        existing = await session.scalar(
+            select(CompatReport).where(
+                CompatReport.user_low_id == user_low_id,
+                CompatReport.user_high_id == user_high_id,
+                CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
+            )
+        )
+        if existing:
+            return serialize_report(existing, user.id)
+
+        if user.compat_credits < 1:
+            raise HTTPException(status_code=402, detail="Not enough credits")
+
+        report = CompatReport(
+            user_low_id=user_low_id,
+            user_high_id=user_high_id,
+            prompt_version=COMPAT_PROMPT_VERSION,
+            status="pending",
+            text="",
+            request_id=payload.requestId,
+        )
+
+        try:
+            async with session.begin():
+                user.compat_credits -= 1
+                session.add(report)
+        except IntegrityError:
+            await session.rollback()
+            existing = await session.scalar(
+                select(CompatReport).where(
+                    CompatReport.user_low_id == user_low_id,
+                    CompatReport.user_high_id == user_high_id,
+                    CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
+                )
+            )
+            if existing:
+                return serialize_report(existing, user.id)
+            if payload.requestId:
+                existing = await session.scalar(
+                    select(CompatReport).where(
+                        CompatReport.request_id == payload.requestId,
+                        (CompatReport.user_low_id == user.id)
+                        | (CompatReport.user_high_id == user.id),
+                    )
+                )
+                if existing:
+                    return serialize_report(existing, user.id)
+            raise HTTPException(status_code=409, detail="Compatibility already exists")
+
+        payload_text = build_compatibility_payload(
+            lang=user.lang,
+            a_result=a_result,
+            b_result=b_result,
+        )
+        try:
+            text = generate_compatibility_text(COMPAT_SYSTEM_PROMPT, payload_text)
+            async with session.begin():
+                saved_report = await session.get(CompatReport, report.id)
+                if saved_report:
+                    saved_report.status = "ready"
+                    saved_report.text = text
+            return serialize_report(saved_report or report, user.id)
+        except Exception as exc:
+            async with session.begin():
+                saved_report = await session.get(CompatReport, report.id)
+                if saved_report:
+                    saved_report.status = "failed"
+                    saved_report.text = ""
+            raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/compatibility/invite", response_model=CompatibilityInviteResponse)
+async def compatibility_invite(
+    payload: CompatibilityInviteRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    if not payload.email and not payload.telegram:
+        raise HTTPException(status_code=400, detail="Email or telegram required")
+    async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        if payload.requestId:
+            existing = await session.scalar(
+                select(Invite).where(
+                    Invite.request_id == payload.requestId,
+                    Invite.inviter_id == user.id,
+                )
+            )
+            if existing:
+                return CompatibilityInviteResponse(
+                    token=existing.token,
+                    status=existing.status,
+                    prompt_version=existing.prompt_version,
+                    created_at=existing.created_at,
+                )
+        existing_user = await session.scalar(
+            select(User).where(
+                (User.email == payload.email) | (User.telegram == payload.telegram)
+            )
+        )
+        if existing_user:
+            raise HTTPException(status_code=409, detail="Target user already exists")
+        if user.compat_credits < 1:
+            raise HTTPException(status_code=402, detail="Not enough credits")
+
+        invite = Invite(
+            token=uuid.uuid4().hex,
+            inviter_id=user.id,
+            invitee_id=None,
+            prompt_version=COMPAT_PROMPT_VERSION,
+            credit_spent=True,
+            credit_refunded=False,
+            status="sent",
+            request_id=payload.requestId,
+        )
+        try:
+            async with session.begin():
+                user.compat_credits -= 1
+                session.add(invite)
+        except IntegrityError:
+            await session.rollback()
+            if payload.requestId:
+                existing = await session.scalar(
+                    select(Invite).where(
+                        Invite.request_id == payload.requestId,
+                        Invite.inviter_id == user.id,
+                    )
+                )
+                if existing:
+                    return CompatibilityInviteResponse(
+                        token=existing.token,
+                        status=existing.status,
+                        prompt_version=existing.prompt_version,
+                        created_at=existing.created_at,
+                    )
+            raise HTTPException(status_code=409, detail="Invite already exists")
+
+        return CompatibilityInviteResponse(
+            token=invite.token,
+            status=invite.status,
+            prompt_version=invite.prompt_version,
+            created_at=invite.created_at,
+        )
+
+
+@app.post("/compatibility/accept_invite", response_model=CompatibilityReportResponse)
+async def compatibility_accept_invite(
+    payload: CompatibilityAcceptInviteRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        invitee = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        invite = await session.scalar(
+            select(Invite).where(Invite.token == payload.token)
+        )
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        if invite.inviter_id == invitee.id:
+            raise HTTPException(status_code=400, detail="Cannot accept own invite")
+        if invite.status == "completed":
+            if invite.invitee_id != invitee.id:
+                raise HTTPException(status_code=409, detail="Invite already used")
+            existing = await session.scalar(
+                select(CompatReport).where(
+                    CompatReport.user_low_id == min(invite.inviter_id, invitee.id),
+                    CompatReport.user_high_id == max(invite.inviter_id, invitee.id),
+                    CompatReport.prompt_version == invite.prompt_version,
+                )
+            )
+            if not existing:
+                raise HTTPException(status_code=404, detail="Report missing")
+            return serialize_report(existing, invitee.id)
+        if invite.invitee_id and invite.invitee_id != invitee.id:
+            raise HTTPException(status_code=409, detail="Invite already used")
+
+        inviter = await session.get(User, invite.inviter_id)
+        if not inviter:
+            raise HTTPException(status_code=404, detail="Inviter not found")
+
+        inviter_result = await session.get(UserResult, inviter.id)
+        invitee_result = await session.get(UserResult, invitee.id)
+        if not inviter_result or not invitee_result:
+            raise HTTPException(status_code=400, detail="Both users must have results")
+
+        user_low_id, user_high_id = sorted([inviter.id, invitee.id])
+        report = await session.scalar(
+            select(CompatReport).where(
+                CompatReport.user_low_id == user_low_id,
+                CompatReport.user_high_id == user_high_id,
+                CompatReport.prompt_version == invite.prompt_version,
+            )
+        )
+        if not report:
+            report = CompatReport(
+                user_low_id=user_low_id,
+                user_high_id=user_high_id,
+                prompt_version=invite.prompt_version,
+                status="pending",
+                text="",
+            )
+
+        async with session.begin():
+            invite.invitee_id = invitee.id
+            invite.status = "completed"
+            if report.id is None:
+                session.add(report)
+            if (
+                invite.credit_spent
+                and not invite.credit_refunded
+                and (inviter.has_full or inviter.packs_bought > 0)
+            ):
+                inviter.compat_credits += 1
+                invite.credit_refunded = True
+
+        if report.status == "ready":
+            return serialize_report(report, invitee.id)
+
+        payload_text = build_compatibility_payload(
+            lang=invitee.lang,
+            a_result=inviter_result,
+            b_result=invitee_result,
+        )
+        try:
+            text = generate_compatibility_text(COMPAT_SYSTEM_PROMPT, payload_text)
+            async with session.begin():
+                saved_report = await session.get(CompatReport, report.id)
+                if saved_report:
+                    saved_report.status = "ready"
+                    saved_report.text = text
+            return serialize_report(saved_report or report, invitee.id)
+        except Exception as exc:
+            async with session.begin():
+                saved_report = await session.get(CompatReport, report.id)
+                if saved_report:
+                    saved_report.status = "failed"
+                    saved_report.text = ""
+            raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/compatibility/list", response_model=CompatibilityListResponse)
+async def compatibility_list(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        query = await session.execute(
+            select(CompatReport)
+            .where(
+                (CompatReport.user_low_id == user.id)
+                | (CompatReport.user_high_id == user.id)
+            )
+            .order_by(CompatReport.created_at.desc())
+        )
+        reports = query.scalars().all()
+        return CompatibilityListResponse(
+            items=[serialize_report(report, user.id) for report in reports]
+        )
 
 
 @app.get("/result/full/{runId}", response_model=FullResponse)

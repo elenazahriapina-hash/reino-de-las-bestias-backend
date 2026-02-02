@@ -1,7 +1,7 @@
 import datetime
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import TEXT, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -58,6 +58,91 @@ class FullResultORM(Base):
         primary_key=True,
     )
     text: Mapped[str] = mapped_column(TEXT)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    telegram: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    lang: Mapped[str] = mapped_column(String(5))
+    auth_token: Mapped[str] = mapped_column(String(64), unique=True)
+    has_full: Mapped[bool] = mapped_column(Boolean, default=False)
+    packs_bought: Mapped[int] = mapped_column(Integer, default=0)
+    compat_credits: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class UserResult(Base):
+    __tablename__ = "user_results"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    animal_code: Mapped[str] = mapped_column(String(30))
+    element_ru: Mapped[str] = mapped_column(String(20))
+    genderForm: Mapped[str] = mapped_column(String(20))
+    short_text: Mapped[str] = mapped_column(TEXT)
+    full_text: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class CompatReport(Base):
+    __tablename__ = "compat_reports"
+    __table_args__ = (
+        UniqueConstraint("user_low_id", "user_high_id", "prompt_version"),
+        UniqueConstraint("request_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_low_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    user_high_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    prompt_version: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20))
+    text: Mapped[str] = mapped_column(TEXT)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class Invite(Base):
+    __tablename__ = "invites"
+    __table_args__ = (UniqueConstraint("request_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True)
+    inviter_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    invitee_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    prompt_version: Mapped[str] = mapped_column(String(120))
+    credit_spent: Mapped[bool] = mapped_column(Boolean, default=False)
+    credit_refunded: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(20))
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.datetime.now(datetime.timezone.utc),
