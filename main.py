@@ -1158,8 +1158,8 @@ async def get_me(
         )
         return UserMeResponse(
             credits=user.compat_credits,
-            has_full=user.has_full,
-            user_id=user.id,
+            hasFull=user.has_full,
+            userId=user.id,
             lang=user.lang,
         )
 
@@ -1175,8 +1175,8 @@ async def compatibility_me(
         )
         return UserMeResponse(
             credits=user.compat_credits,
-            has_full=user.has_full,
-            user_id=user.id,
+            hasFull=user.has_full,
+            userId=user.id,
             lang=user.lang,
         )
 
