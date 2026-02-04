@@ -1098,6 +1098,11 @@ async def register(payload: RegisterRequest):
     )
 
 
+@app.post("/compatibility/register", response_model=RegisterResponse)
+async def compatibility_register(payload: RegisterRequest):
+    return await register(payload)
+
+
 @app.get("/users/me", response_model=UserResponse)
 async def get_me(
     authorization: str | None = Header(default=None, alias="Authorization"),
