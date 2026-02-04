@@ -80,6 +80,22 @@ class RegisterResponse(BaseModel):
     hasFull: bool
 
 
+class DevSeedUserRequest(BaseModel):
+    email: str | None = None
+    telegram: str | None = None
+    name: str
+    lang: Literal["ru", "en", "es", "pt"]
+    animal: str
+    element: str
+    genderForm: str
+    short_text: str
+
+
+class DevSeedUserResponse(BaseModel):
+    userId: int
+    token: str
+
+
 class UserMeResponse(BaseModel):
     credits: int
     has_full: bool = Field(..., alias="hasFull")

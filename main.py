@@ -50,6 +50,8 @@ from schemas import (
     CompatibilityInviteResponse,
     CompatibilityListResponse,
     CompatibilityReportResponse,
+    DevSeedUserRequest,
+    DevSeedUserResponse,
     FullRequest,
     FullResponse,
     LookupUserResponse,
@@ -515,6 +517,10 @@ Rules:
 - Analysis must be universal
 - Do not mention emails, telegrams, or identities
 """.strip()
+
+
+def is_dev_seed_enabled() -> bool:
+    return os.getenv("DEV_SEED_ENABLED", "").lower() == "true"
 
 
 def serialize_report(
@@ -1140,6 +1146,59 @@ async def register(payload: RegisterRequest):
         credits=user.compat_credits,
         hasFull=user.has_full,
     )
+
+
+@app.post("/dev/seed_user", response_model=DevSeedUserResponse)
+async def dev_seed_user(payload: DevSeedUserRequest):
+    if not is_dev_seed_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not payload.email and not payload.telegram:
+        raise HTTPException(status_code=400, detail="Email or telegram required")
+    conditions = []
+    if payload.email:
+        conditions.append(User.email == payload.email)
+    if payload.telegram:
+        conditions.append(User.telegram == payload.telegram)
+    async with SessionLocal() as session:
+        existing_users = (
+            (await session.execute(select(User).where(or_(*conditions))))
+            .scalars()
+            .all()
+        )
+        if len(existing_users) > 1:
+            raise HTTPException(
+                status_code=409, detail="Email and telegram belong to different users"
+            )
+        if existing_users:
+            user = existing_users[0]
+            return DevSeedUserResponse(userId=user.id, token=user.auth_token)
+
+        auth_token = uuid.uuid4().hex
+        user = User(
+            email=payload.email,
+            telegram=payload.telegram,
+            name=payload.name,
+            lang=payload.lang,
+            auth_token=auth_token,
+            has_full=False,
+            packs_bought=0,
+            compat_credits=1,
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        session.add(
+            UserResult(
+                user_id=user.id,
+                animal_code=payload.animal,
+                element_ru=payload.element,
+                genderForm=payload.genderForm,
+                short_text=payload.short_text,
+            )
+        )
+        await session.commit()
+
+    return DevSeedUserResponse(userId=user.id, token=user.auth_token)
 
 
 @app.post("/compatibility/register", response_model=RegisterResponse)
