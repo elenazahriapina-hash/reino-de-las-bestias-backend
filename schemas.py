@@ -53,8 +53,9 @@ class FullResponse(BaseModel):
 class RegisterRequest(BaseModel):
     email: str | None = None
     telegram: str | None = None
-    name: str
-    lang: Literal["ru", "en", "es", "pt"]
+    name: str | None = None
+    lang: Literal["ru", "en", "es", "pt"] | None = None
+    shortResult: ShortResult | None = None
 
 
 class UserResponse(BaseModel):
@@ -69,8 +70,11 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
-class RegisterResponse(UserResponse):
-    auth_token: str
+class RegisterResponse(BaseModel):
+    userId: int
+    token: str
+    credits: int
+    hasFull: bool
 
 
 class LookupUserResponse(BaseModel):

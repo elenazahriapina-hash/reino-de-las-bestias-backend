@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from sqlalchemy import delete, select, text as sql_text
+from sqlalchemy import or_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from fastapi import FastAPI, HTTPException, Header
@@ -1061,40 +1062,82 @@ async def analyze_full_legacy_endpoint(payload: AnalyzeRequest):
 async def register(payload: RegisterRequest):
     if not payload.email and not payload.telegram:
         raise HTTPException(status_code=400, detail="Email or telegram required")
+    conditions = []
+    if payload.email:
+        conditions.append(User.email == payload.email)
+    if payload.telegram:
+        conditions.append(User.telegram == payload.telegram)
+    if not conditions:
+        raise HTTPException(status_code=400, detail="Email or telegram required")
     async with SessionLocal() as session:
-        existing = await session.scalar(
-            select(User).where(
-                (User.email == payload.email) | (User.telegram == payload.telegram)
+        existing_users = (
+            (await session.execute(select(User).where(or_(*conditions))))
+            .scalars()
+            .all()
+        )
+        if len(existing_users) > 1:
+            raise HTTPException(
+                status_code=409, detail="Email and telegram belong to different users"
             )
-        )
-        if existing:
-            raise HTTPException(status_code=409, detail="User already exists")
-        auth_token = uuid.uuid4().hex
-        user = User(
-            email=payload.email,
-            telegram=payload.telegram,
-            name=payload.name,
-            lang=payload.lang,
-            auth_token=auth_token,
-            has_full=False,
-            packs_bought=0,
-            compat_credits=1,
-        )
-        session.add(user)
-        await session.commit()
-        await session.refresh(user)
+        if existing_users:
+            user = existing_users[0]
+            if payload.name:
+                user.name = payload.name
+            if payload.lang:
+                user.lang = payload.lang
+            if payload.shortResult:
+                existing_result = await session.get(UserResult, user.id)
+                if existing_result:
+                    existing_result.animal_code = payload.shortResult.animal
+                    existing_result.element_ru = payload.shortResult.element
+                    existing_result.genderForm = payload.shortResult.genderForm
+                    existing_result.short_text = payload.shortResult.text
+                else:
+                    session.add(
+                        UserResult(
+                            user_id=user.id,
+                            animal_code=payload.shortResult.animal,
+                            element_ru=payload.shortResult.element,
+                            genderForm=payload.shortResult.genderForm,
+                            short_text=payload.shortResult.text,
+                        )
+                    )
+            await session.commit()
+            await session.refresh(user)
+        else:
+            if not payload.name or not payload.lang:
+                raise HTTPException(status_code=400, detail="Name and lang required")
+            auth_token = uuid.uuid4().hex
+            user = User(
+                email=payload.email,
+                telegram=payload.telegram,
+                name=payload.name,
+                lang=payload.lang,
+                auth_token=auth_token,
+                has_full=False,
+                packs_bought=0,
+                compat_credits=1,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            if payload.shortResult:
+                session.add(
+                    UserResult(
+                        user_id=user.id,
+                        animal_code=payload.shortResult.animal,
+                        element_ru=payload.shortResult.element,
+                        genderForm=payload.shortResult.genderForm,
+                        short_text=payload.shortResult.text,
+                    )
+                )
+                await session.commit()
 
     return RegisterResponse(
-        id=user.id,
-        email=user.email,
-        telegram=user.telegram,
-        name=user.name,
-        lang=user.lang,
-        auth_token=user.auth_token,
-        has_full=user.has_full,
-        packs_bought=user.packs_bought,
-        compat_credits=user.compat_credits,
-        created_at=user.created_at,
+        userId=user.id,
+        token=user.auth_token,
+        credits=user.compat_credits,
+        hasFull=user.has_full,
     )
 
 
@@ -1226,8 +1269,12 @@ async def compatibility_check(
 
         a_result = await session.get(UserResult, user.id)
         b_result = await session.get(UserResult, target.id)
-        if not a_result or not b_result:
-            raise HTTPException(status_code=400, detail="Both users must have results")
+        if not a_result:
+            raise HTTPException(status_code=400, detail="Complete test first")
+        if not b_result:
+            raise HTTPException(
+                status_code=400, detail="Target user must complete test first"
+            )
 
         user_low_id, user_high_id = sorted([user.id, target.id])
         existing = await session.scalar(
@@ -1416,8 +1463,12 @@ async def compatibility_accept_invite(
 
         inviter_result = await session.get(UserResult, inviter.id)
         invitee_result = await session.get(UserResult, invitee.id)
-        if not inviter_result or not invitee_result:
-            raise HTTPException(status_code=400, detail="Both users must have results")
+        if not invitee_result:
+            raise HTTPException(status_code=400, detail="Complete test first")
+        if not inviter_result:
+            raise HTTPException(
+                status_code=400, detail="Inviter must complete test first"
+            )
 
         user_low_id, user_high_id = sorted([inviter.id, invitee.id])
         report = await session.scalar(
