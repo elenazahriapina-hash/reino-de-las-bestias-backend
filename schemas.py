@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TestAnswer(BaseModel):
@@ -64,10 +64,13 @@ class UserResponse(BaseModel):
     telegram: str | None
     name: str
     lang: str
-    has_full: bool
-    packs_bought: int
-    compat_credits: int
+    has_full: bool = Field(..., alias="hasFull")
+    packs_bought: int = Field(..., alias="packsBought")
+    compat_credits: int = Field(..., alias="compatCredits")
     created_at: datetime
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class RegisterResponse(BaseModel):
