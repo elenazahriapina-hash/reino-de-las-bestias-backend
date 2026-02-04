@@ -112,6 +112,12 @@ class LookupUserResponse(BaseModel):
     lang: str
 
 
+class CompatibilityLookupRequest(BaseModel):
+    q: str | None = None
+    email: str | None = None
+    telegram: str | None = None
+
+
 class CompatibilityCheckRequest(BaseModel):
     target_user_id: int
     requestId: str | None = None

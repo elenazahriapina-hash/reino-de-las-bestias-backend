@@ -44,6 +44,7 @@ from utils_animals import (
 )
 from schemas import (
     AnalyzeRequest,
+    CompatibilityLookupRequest,
     CompatibilityAcceptInviteRequest,
     CompatibilityCheckRequest,
     CompatibilityInviteRequest,
@@ -1246,6 +1247,27 @@ async def lookup_user(
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
 ):
+    if not q:
+        raise HTTPException(status_code=400, detail="q is required")
+    async with SessionLocal() as session:
+        await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        user = await session.scalar(
+            select(User).where((User.email == q) | (User.telegram == q))
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return LookupUserResponse(id=user.id, name=user.name, lang=user.lang)
+
+
+@app.post("/compatibility/lookup", response_model=LookupUserResponse)
+async def compatibility_lookup(
+    payload: CompatibilityLookupRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    q = (payload.q or payload.email or payload.telegram or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="q is required")
     async with SessionLocal() as session:
