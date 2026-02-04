@@ -57,6 +57,7 @@ from schemas import (
     RegisterResponse,
     ShortResponse,
     TestAnswer,
+    UserMeResponse,
     UserResponse,
 )
 
@@ -1146,7 +1147,7 @@ async def compatibility_register(payload: RegisterRequest):
     return await register(payload)
 
 
-@app.get("/users/me", response_model=UserResponse)
+@app.get("/users/me", response_model=UserMeResponse)
 async def get_me(
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
@@ -1155,16 +1156,28 @@ async def get_me(
         user = await get_current_user(
             session, authorization=authorization, x_auth_token=x_auth_token
         )
-        return UserResponse(
-            id=user.id,
-            email=user.email,
-            telegram=user.telegram,
-            name=user.name,
-            lang=user.lang,
+        return UserMeResponse(
+            credits=user.compat_credits,
             has_full=user.has_full,
-            packs_bought=user.packs_bought,
-            compat_credits=user.compat_credits,
-            created_at=user.created_at,
+            user_id=user.id,
+            lang=user.lang,
+        )
+
+
+@app.get("/compatibility/me", response_model=UserMeResponse)
+async def compatibility_me(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        return UserMeResponse(
+            credits=user.compat_credits,
+            has_full=user.has_full,
+            user_id=user.id,
+            lang=user.lang,
         )
 
 

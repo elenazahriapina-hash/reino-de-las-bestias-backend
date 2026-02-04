@@ -80,6 +80,16 @@ class RegisterResponse(BaseModel):
     hasFull: bool
 
 
+class UserMeResponse(BaseModel):
+    credits: int
+    has_full: bool = Field(..., alias="hasFull")
+    user_id: int = Field(..., alias="userId")
+    lang: str
+
+    class Config:
+        allow_population_by_field_name = True
+
+
 class LookupUserResponse(BaseModel):
     id: int
     name: str
