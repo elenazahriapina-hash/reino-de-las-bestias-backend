@@ -116,6 +116,7 @@ class CompatReport(Base):
     user_high_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE")
     )
+    language: Mapped[str] = mapped_column(String(5), default="ru")
     prompt_version: Mapped[str] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20))
     text: Mapped[str] = mapped_column(TEXT)

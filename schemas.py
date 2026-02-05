@@ -119,14 +119,19 @@ class CompatibilityLookupRequest(BaseModel):
 
 
 class CompatibilityCheckRequest(BaseModel):
-    target_user_id: int
+    target_user_id: int = Field(..., alias="targetUserId")
     requestId: str | None = None
+    lang: Literal["ru", "en", "es", "pt"] | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 class CompatibilityInviteRequest(BaseModel):
     email: str | None = None
     telegram: str | None = None
     requestId: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 class CompatibilityAcceptInviteRequest(BaseModel):

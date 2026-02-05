@@ -17,7 +17,7 @@ from ai import (
     ALLOWED_ELEMENTS,
     ALLOWED_GENDERS,
     COMPAT_PROMPT_VERSION,
-    COMPAT_SYSTEM_PROMPT,
+    COMPATIBILITY_PROMPT_V3,
     run_short_analysis,
     generate_short_text,
     run_full_analysis,
@@ -441,14 +441,6 @@ def normalize_answers(answers: list[TestAnswer]) -> list[TestAnswer]:
     return answers
 
 
-LANGUAGE_NAMES = {
-    "ru": "Russian",
-    "en": "English",
-    "es": "Spanish",
-    "pt": "Portuguese",
-}
-
-
 def extract_auth_token(
     authorization: str | None, x_auth_token: str | None
 ) -> str | None:
@@ -481,42 +473,31 @@ def build_compatibility_payload(
     lang: str,
     a_result: UserResult,
     b_result: UserResult,
+    a_name: str | None,
+    b_name: str | None,
 ) -> str:
-    language_name = LANGUAGE_NAMES.get(lang, "Russian")
     a_animal_ru = get_animal_ru_name(a_result.animal_code, a_result.genderForm)
     b_animal_ru = get_animal_ru_name(b_result.animal_code, b_result.genderForm)
-    a_full = a_result.full_text or "NOT_PROVIDED"
-    b_full = b_result.full_text or "NOT_PROVIDED"
+    a_full = a_result.full_text or a_result.short_text or "NOT_PROVIDED"
+    b_full = b_result.full_text or b_result.short_text or "NOT_PROVIDED"
+    a_name_value = a_name or ""
+    b_name_value = b_name or ""
+    language_tag = lang.upper()
 
     return f"""
-Output language: {language_name} (langCode={lang})
+LANGUAGE: {language_tag}
 
-Person A
-Archetype: {a_animal_ru} {a_result.element_ru}
-SHORT:
-<<<SHORT_A
-{a_result.short_text}
-SHORT_A>>>
-FULL:
-<<<FULL_A
+Человек A:
+Имя: {a_name_value}
+Архетип: {a_animal_ru} {a_result.element_ru}
+Ответы:
 {a_full}
-FULL_A>>>
 
-Person B
-Archetype: {b_animal_ru} {b_result.element_ru}
-SHORT:
-<<<SHORT_B
-{b_result.short_text}
-SHORT_B>>>
-FULL:
-<<<FULL_B
+Человек B:
+Имя: {b_name_value}
+Архетип: {b_animal_ru} {b_result.element_ru}
+Ответы:
 {b_full}
-FULL_B>>>
-
-Rules:
-- If NOT_PROVIDED → do not invent facts
-- Analysis must be universal
-- Do not mention emails, telegrams, or identities
 """.strip()
 
 
@@ -1383,20 +1364,30 @@ async def compatibility_check(
 
         if user.compat_credits < 1:
             raise HTTPException(status_code=402, detail="Not enough credits")
+        report_language = payload.lang or user.lang
+        payload_text = build_compatibility_payload(
+            lang=report_language,
+            a_result=a_result,
+            b_result=b_result,
+            a_name=user.name,
+            b_name=target.name,
+        )
+        text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
 
         report = CompatReport(
             user_low_id=user_low_id,
             user_high_id=user_high_id,
+            language=report_language,
             prompt_version=COMPAT_PROMPT_VERSION,
-            status="pending",
-            text="",
+            status="ready",
+            text=text,
             request_id=payload.requestId,
         )
 
         try:
             async with session.begin():
-                user.compat_credits -= 1
                 session.add(report)
+                user.compat_credits -= 1
         except IntegrityError:
             await session.rollback()
             existing = await session.scalar(
@@ -1419,27 +1410,7 @@ async def compatibility_check(
                 if existing:
                     return serialize_report(existing, user.id)
             raise HTTPException(status_code=409, detail="Compatibility already exists")
-
-        payload_text = build_compatibility_payload(
-            lang=user.lang,
-            a_result=a_result,
-            b_result=b_result,
-        )
-        try:
-            text = generate_compatibility_text(COMPAT_SYSTEM_PROMPT, payload_text)
-            async with session.begin():
-                saved_report = await session.get(CompatReport, report.id)
-                if saved_report:
-                    saved_report.status = "ready"
-                    saved_report.text = text
-            return serialize_report(saved_report or report, user.id)
-        except Exception as exc:
-            async with session.begin():
-                saved_report = await session.get(CompatReport, report.id)
-                if saved_report:
-                    saved_report.status = "failed"
-                    saved_report.text = ""
-            raise HTTPException(status_code=500, detail=str(exc))
+        return serialize_report(report, user.id)
 
 
 @app.post("/compatibility/invite", response_model=CompatibilityInviteResponse)
@@ -1576,6 +1547,7 @@ async def compatibility_accept_invite(
             report = CompatReport(
                 user_low_id=user_low_id,
                 user_high_id=user_high_id,
+                language=invitee.lang,
                 prompt_version=invite.prompt_version,
                 status="pending",
                 text="",
@@ -1601,9 +1573,11 @@ async def compatibility_accept_invite(
             lang=invitee.lang,
             a_result=inviter_result,
             b_result=invitee_result,
+            a_name=inviter.name,
+            b_name=invitee.name,
         )
         try:
-            text = generate_compatibility_text(COMPAT_SYSTEM_PROMPT, payload_text)
+            text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
             async with session.begin():
                 saved_report = await session.get(CompatReport, report.id)
                 if saved_report:
