@@ -532,6 +532,10 @@ def is_dev_seed_enabled() -> bool:
     return os.getenv("DEV_SEED_ENABLED", "").lower() == "true"
 
 
+def clamp_credits(value: int) -> int:
+    return max(0, min(3, value))
+
+
 def serialize_report(
     report: CompatReport, current_user_id: int
 ) -> CompatibilityReportResponse:
@@ -545,11 +549,14 @@ def serialize_report(
     status = report.status or "ready"
     return CompatibilityReportResponse(
         id=report.id,
+        reportId=report.id,
         other_user_id=other_user_id,
         prompt_version=report.prompt_version,
         status=status,
         text=text,
         created_at=created_at,
+        createdAt=created_at,
+        counterpart=None,
     )
 
 
@@ -1053,6 +1060,11 @@ async def analyze_full(
                                     full_text=text,
                                 )
                             )
+                        if not user.has_full:
+                            user.has_full = True
+                            user.compat_credits = clamp_credits(
+                                max(user.compat_credits or 0, 3)
+                            )
 
         return {
             "type": "full",
@@ -1135,7 +1147,7 @@ async def register(payload: RegisterRequest):
                 auth_token=auth_token,
                 has_full=False,
                 packs_bought=0,
-                compat_credits=1,
+                compat_credits=clamp_credits(1),
             )
             session.add(user)
             await session.commit()
@@ -1194,7 +1206,7 @@ async def dev_seed_user(payload: DevSeedUserRequest):
             auth_token=auth_token,
             has_full=False,
             packs_bought=0,
-            compat_credits=1,
+            compat_credits=clamp_credits(1),
         )
         session.add(user)
         await session.commit()
@@ -1305,7 +1317,7 @@ async def purchase_full(
             )
             if not user.has_full:
                 user.has_full = True
-                user.compat_credits += 3
+                user.compat_credits = clamp_credits(max(user.compat_credits or 0, 3))
         await session.refresh(user)
         return UserResponse(
             id=user.id,
@@ -1331,7 +1343,7 @@ async def purchase_compat_pack(
                 session, authorization=authorization, x_auth_token=x_auth_token
             )
             user.packs_bought += 1
-            user.compat_credits += 3
+            user.compat_credits = clamp_credits(user.compat_credits + 3)
         await session.refresh(user)
         return UserResponse(
             id=user.id,
@@ -1343,6 +1355,27 @@ async def purchase_compat_pack(
             packs_bought=user.packs_bought,
             compat_credits=user.compat_credits,
             created_at=user.created_at,
+        )
+
+
+@app.post("/compatibility/purchase_pack", response_model=UserMeResponse)
+async def compatibility_purchase_pack(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await get_current_user(
+                session, authorization=authorization, x_auth_token=x_auth_token
+            )
+            user.packs_bought += 1
+            user.compat_credits = clamp_credits(3)
+        await session.refresh(user)
+        return UserMeResponse(
+            credits=user.compat_credits,
+            hasFull=user.has_full,
+            userId=user.id,
+            lang=user.lang,
         )
 
 
@@ -1389,8 +1422,8 @@ async def compatibility_check(
         if existing:
             return serialize_report(existing, user_id)
 
-        if user.compat_credits < 1:
-            raise HTTPException(status_code=402, detail="Not enough credits")
+        if user.compat_credits <= 0:
+            raise HTTPException(status_code=402, detail="NO_COMPAT_CREDITS")
         report_language = payload.lang or user.lang or "ru"
         payload_text = build_compatibility_payload(
             lang=report_language,
@@ -1406,8 +1439,8 @@ async def compatibility_check(
             user = await session.get(User, user_id)
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
-            if user.compat_credits < 1:
-                raise HTTPException(status_code=402, detail="Not enough credits")
+            if user.compat_credits <= 0:
+                raise HTTPException(status_code=402, detail="NO_COMPAT_CREDITS")
             existing = await session.scalar(
                 select(CompatReport).where(
                     CompatReport.user_low_id == user_low_id,
@@ -1615,7 +1648,7 @@ async def compatibility_accept_invite(
                 and not invite.credit_refunded
                 and (inviter.has_full or inviter.packs_bought > 0)
             ):
-                inviter.compat_credits += 1
+                inviter.compat_credits = clamp_credits(inviter.compat_credits + 1)
                 invite.credit_refunded = True
 
         if report.status == "ready":
@@ -1663,8 +1696,10 @@ async def compatibility_list(
             .order_by(CompatReport.created_at.desc())
         )
         reports = query.scalars().all()
+        serialized = [serialize_report(report, user.id) for report in reports]
         return CompatibilityListResponse(
-            items=[serialize_report(report, user.id) for report in reports]
+            items=serialized,
+            history=serialized,
         )
 
 
