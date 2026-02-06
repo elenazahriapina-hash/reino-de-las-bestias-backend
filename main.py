@@ -1,12 +1,13 @@
 import os
 import uuid
+from datetime import datetime
 
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from sqlalchemy import delete, select, text as sql_text
-from sqlalchemy import or_
+from sqlalchemy import inspect, or_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from fastapi import FastAPI, HTTPException, Header
@@ -68,10 +69,30 @@ app = FastAPI()
 
 
 # -------------------- MODELS --------------------
+def _ensure_compat_schema(sync_conn) -> None:
+    table = CompatReport.__tablename__
+    insp = inspect(sync_conn)
+    cols = {c["name"] for c in insp.get_columns(table)}
+
+    if "language" not in cols:
+        sync_conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN language TEXT"))
+        sync_conn.execute(
+            sql_text(f"UPDATE {table} SET language='ru' WHERE language IS NULL")
+        )
+
+    if "status" in cols:
+        sync_conn.execute(
+            sql_text(f"UPDATE {table} SET status='ready' WHERE status IS NULL")
+        )
+    if "text" in cols:
+        sync_conn.execute(sql_text(f"UPDATE {table} SET text='' WHERE text IS NULL"))
+
+
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_compat_schema)
 
 
 app.add_middleware(
@@ -513,13 +534,16 @@ def serialize_report(
         if report.user_low_id == current_user_id
         else report.user_low_id
     )
+    created_at = report.created_at or datetime.utcnow()
+    text = report.text or ""
+    status = report.status or "ready"
     return CompatibilityReportResponse(
         id=report.id,
         other_user_id=other_user_id,
         prompt_version=report.prompt_version,
-        status=report.status,
-        text=report.text,
-        created_at=report.created_at,
+        status=status,
+        text=text,
+        created_at=created_at,
     )
 
 
@@ -1364,7 +1388,7 @@ async def compatibility_check(
 
         if user.compat_credits < 1:
             raise HTTPException(status_code=402, detail="Not enough credits")
-        report_language = payload.lang or user.lang
+        report_language = payload.lang or user.lang or "ru"
         payload_text = build_compatibility_payload(
             lang=report_language,
             a_result=a_result,
