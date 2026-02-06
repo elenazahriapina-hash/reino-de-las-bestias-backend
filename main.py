@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-from sqlalchemy import delete, select, text as sql_text
+from sqlalchemy import Text, delete, select, text as sql_text
 from sqlalchemy import inspect, or_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +37,7 @@ from models import (
     Invite,
 )
 from utils_animals import (
+    animal_emoji,
     build_image_key,
     get_animal_display_name,
     get_element_display_name,
@@ -72,7 +73,9 @@ app = FastAPI()
 def _ensure_compat_schema(sync_conn) -> None:
     table = CompatReport.__tablename__
     insp = inspect(sync_conn)
-    cols = {c["name"] for c in insp.get_columns(table)}
+    columns = insp.get_columns(table)
+    cols = {c["name"] for c in columns}
+    text_col = next((c for c in columns if c["name"] == "text"), None)
 
     if "language" not in cols:
         sync_conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN language TEXT"))
@@ -86,6 +89,10 @@ def _ensure_compat_schema(sync_conn) -> None:
         )
     if "text" in cols:
         sync_conn.execute(sql_text(f"UPDATE {table} SET text='' WHERE text IS NULL"))
+        if text_col and not isinstance(text_col["type"], Text):
+            sync_conn.execute(
+                sql_text(f"ALTER TABLE {table} ALTER COLUMN text TYPE TEXT")
+            )
 
 
 @app.on_event("startup")
@@ -507,6 +514,7 @@ def build_compatibility_payload(
         lang=lang,
     )
     a_full = a_result.full_text or a_result.short_text or "NOT_PROVIDED"
+    a_emoji = animal_emoji(a_result.animal_code)
     if b_result:
         b_animal_display = get_animal_display_name(
             animal_code=b_result.animal_code,
@@ -517,18 +525,23 @@ def build_compatibility_payload(
             element_code=b_result.element_ru,
             lang=lang,
         )
-        b_element = b_result.element_ru
         b_full = b_result.full_text or b_result.short_text or "NOT_PROVIDED"
+        b_emoji = animal_emoji(b_result.animal_code)
     else:
         b_animal_display = "НЕИЗВЕСТНО"
         b_element_display = "неизвестно"
         b_full = "(нет данных)"
+        b_emoji = animal_emoji("Fox")
     a_name_value = a_name or ""
     b_name_value = b_name or ""
     language_tag = lang.upper()
+    line_a = f"{a_emoji} {a_name_value} — {a_animal_display} {a_element_display}"
+    line_b = f"{b_emoji} {b_name_value} — {b_animal_display} {b_element_display}"
 
     return f"""
 LANGUAGE: {language_tag}
+LINE_A: {line_a}
+LINE_B: {line_b}
 
 Человек A:
 Имя: {a_name_value}
@@ -565,6 +578,22 @@ def serialize_report(
     created_at = report.created_at or datetime.utcnow()
     text = report.text or ""
     status = report.status or "ready"
+    if counterpart:
+        counterpart_payload = {
+            "id": counterpart.id,
+            "name": counterpart.name,
+            "email": counterpart.email,
+            "telegram": counterpart.telegram,
+            "lang": counterpart.lang,
+        }
+    else:
+        counterpart_payload = {
+            "id": other_user_id,
+            "name": "",
+            "email": None,
+            "telegram": None,
+            "lang": "",
+        }
     return CompatibilityReportResponse(
         id=report.id,
         reportId=report.id,
@@ -575,18 +604,26 @@ def serialize_report(
         text=text,
         created_at=created_at,
         createdAt=created_at,
-        counterpart=(
-            None
-            if not counterpart
-            else {
-                "id": counterpart.id,
-                "name": counterpart.name,
-                "email": counterpart.email,
-                "telegram": counterpart.telegram,
-                "lang": counterpart.lang,
-            }
-        ),
+        counterpart=counterpart_payload,
     )
+
+
+def strip_prompt_echo(text: str, line_a: str, line_b: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    first_index = stripped.find(line_a)
+    if first_index != -1:
+        stripped = stripped[first_index:]
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("LINE_A: "):
+        lines[0] = lines[0].replace("LINE_A: ", "", 1)
+    if len(lines) > 1 and lines[1].startswith("LINE_B: "):
+        lines[1] = lines[1].replace("LINE_B: ", "", 1)
+    cleaned = "\n".join(lines)
+    if lines[:2] == [line_a, line_b]:
+        return cleaned
+    return cleaned
 
 
 async def ensure_run_and_answers(
@@ -1168,7 +1205,7 @@ async def register(payload: RegisterRequest):
             if not payload.name or not payload.lang:
                 raise HTTPException(status_code=400, detail="Name and lang required")
             auth_token = uuid.uuid4().hex
-            initial_credits = 1 if payload.shortResult else 0
+            initial_credits = 1
             user = User(
                 email=payload.email,
                 telegram=payload.telegram,
@@ -1436,8 +1473,6 @@ async def compatibility_check(
                     else existing.user_low_id
                 )
                 counterpart = await session.get(User, other_user_id)
-                if not counterpart:
-                    raise HTTPException(status_code=404, detail="User not found")
                 return serialize_report(existing, user_id, counterpart)
         target = await session.get(User, payload.target_user_id)
         if not target:
@@ -1471,7 +1506,11 @@ async def compatibility_check(
             a_name=user.name,
             b_name=target.name,
         )
+        payload_lines = payload_text.splitlines()
+        line_a = payload_lines[1].replace("LINE_A: ", "", 1)
+        line_b = payload_lines[2].replace("LINE_B: ", "", 1)
         text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
+        text = strip_prompt_echo(text, line_a, line_b)
 
         report = CompatReport(
             user_low_id=user_low_id,
@@ -1618,8 +1657,6 @@ async def compatibility_accept_invite(
             if not existing:
                 raise HTTPException(status_code=404, detail="Report missing")
             counterpart = await session.get(User, invite.inviter_id)
-            if not counterpart:
-                raise HTTPException(status_code=404, detail="User not found")
             return serialize_report(existing, invitee.id, counterpart)
         if invite.invitee_id and invite.invitee_id != invitee.id:
             raise HTTPException(status_code=409, detail="Invite already used")
@@ -1670,8 +1707,6 @@ async def compatibility_accept_invite(
 
         if report.status == "ready":
             counterpart = await session.get(User, inviter.id)
-            if not counterpart:
-                raise HTTPException(status_code=404, detail="User not found")
             return serialize_report(report, invitee.id, counterpart)
 
         payload_text = build_compatibility_payload(
@@ -1682,15 +1717,17 @@ async def compatibility_accept_invite(
             b_name=invitee.name,
         )
         try:
+            payload_lines = payload_text.splitlines()
+            line_a = payload_lines[1].replace("LINE_A: ", "", 1)
+            line_b = payload_lines[2].replace("LINE_B: ", "", 1)
             text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
+            text = strip_prompt_echo(text, line_a, line_b)
             saved_report = await session.get(CompatReport, report.id)
             if saved_report:
                 saved_report.status = "ready"
                 saved_report.text = text
             await session.commit()
             counterpart = await session.get(User, inviter.id)
-            if not counterpart:
-                raise HTTPException(status_code=404, detail="User not found")
             return serialize_report(saved_report or report, invitee.id, counterpart)
         except Exception as exc:
             saved_report = await session.get(CompatReport, report.id)
@@ -1718,7 +1755,11 @@ async def compatibility_list(
             )
             .order_by(CompatReport.created_at.desc())
         )
-        reports = query.scalars().all()
+        reports = [
+            report
+            for report in query.scalars().all()
+            if report.status == "ready" and (report.text or "").strip()
+        ]
         counterpart_ids = {
             report.user_high_id if report.user_low_id == user.id else report.user_low_id
             for report in reports
@@ -1743,8 +1784,6 @@ async def compatibility_list(
                 else report.user_low_id
             )
             counterpart = counterpart_map.get(other_id)
-            if not counterpart:
-                continue
             serialized.append(serialize_report(report, user.id, counterpart))
         return CompatibilityListResponse(
             items=serialized,

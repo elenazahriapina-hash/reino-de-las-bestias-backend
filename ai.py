@@ -47,7 +47,7 @@ ALLOWED_ANIMALS = {
 ALLOWED_ELEMENTS = {"Воздух", "Вода", "Огонь", "Земля"}
 ALLOWED_GENDERS = {"male", "female", "unspecified"}
 
-COMPAT_PROMPT_VERSION = "v3"
+COMPAT_PROMPT_VERSION = "v4"
 
 COMPATIBILITY_PROMPT_V3 = """
 You are generating a compatibility report for the “24 animals × 4 elements” system.
@@ -56,43 +56,42 @@ STRICT RULES:
 1) Output ONLY the final report text. No JSON, no preface, no analysis, no prompt echoing.
 2) Use the language specified by the `LANGUAGE:` tag in the user payload (ru/en/es/pt).
 3) Use the names, animals, and elements exactly as provided in the payload.
-4) The first two lines must be exactly:
-   🟢 {nameA} — {animalA} {elementA}
-   🔴 {nameB} — {animalB} {elementB}
-5) Then output the following numbered section headings in the selected language and provide the content for each section.
+4) The first two lines must be EXACTLY the strings provided as LINE_A and LINE_B in the payload.
+5) After the first two lines, output the sections using the headings listed below for the selected language.
+6) Tone: warm, mature, grounded. No diagnostics, no fate, no percentages.
 
 SECTION HEADINGS BY LANGUAGE:
 ru:
-1) Основное сходство
-2) Ключевые различия
-3) Сильные стороны
-4) Возможные сложности
-5) Рекомендации
-6) Итог
+Основное сходство
+Ключевые различия
+Сильные стороны
+Возможные сложности
+Рекомендации
+Итог
 
 en:
-1) Key similarities
-2) Key differences
-3) Strengths
-4) Potential challenges
-5) Recommendations
-6) Summary
+Key similarities
+Key differences
+Strengths
+Potential challenges
+Recommendations
+Summary
 
 es:
-1) Similitudes
-2) Diferencias clave
-3) Fortalezas
-4) Dificultades
-5) Recomendaciones
-6) Resumen
+Similitudes principales
+Diferencias clave
+Fortalezas
+Posibles dificultades
+Recomendaciones
+Resumen
 
 pt:
-1) Semelhanças
-2) Diferenças-chave
-3) Pontos fortes
-4) Desafios
-5) Recomendações
-6) Resumo
+Semelhanças principais
+Diferenças-chave
+Pontos fortes
+Desafios
+Recomendações
+Resumo
 
 Keep each section concise and focused on the provided data.
 """.strip()

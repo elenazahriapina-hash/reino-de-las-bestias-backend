@@ -25,6 +25,33 @@ ANIMAL_RU = {
     "Lizard": {"male": "Ящерица", "female": "Ящерица"},
 }
 
+ANIMAL_EMOJI = {
+    "Wolf": "🐺",
+    "Lion": "🦁",
+    "Tiger": "🐯",
+    "Lynx": "🐱",
+    "Panther": "🐆",
+    "Bear": "🐻",
+    "Fox": "🦊",
+    "Wolverine": "🦡",
+    "Deer": "🦌",
+    "Monkey": "🐵",
+    "Rabbit": "🐰",
+    "Buffalo": "🐃",
+    "Ram": "🐏",
+    "Capybara": "🐹",
+    "Elephant": "🐘",
+    "Horse": "🐴",
+    "Eagle": "🦅",
+    "Owl": "🦉",
+    "Raven": "🐦",
+    "Parrot": "🦜",
+    "Snake": "🐍",
+    "Crocodile": "🐊",
+    "Turtle": "🐢",
+    "Lizard": "🦎",
+}
+
 
 def get_animal_ru_name(animal_code: str, gender: str) -> str:
     g = "female" if gender == "female" else "male"
@@ -119,6 +146,10 @@ def get_animal_display_name(animal_code: str, lang: str, gender: str) -> str:
     if lang not in ANIMAL_DISPLAY:
         return get_animal_ru_name(animal_code, gender)
     return ANIMAL_DISPLAY[lang].get(animal_code, animal_code)
+
+
+def animal_emoji(animal_code: str) -> str:
+    return ANIMAL_EMOJI.get(animal_code, "🦊")
 
 
 ELEMENT_NUMBER = {
