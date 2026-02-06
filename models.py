@@ -77,7 +77,7 @@ class User(Base):
     auth_token: Mapped[str] = mapped_column(String(64), unique=True)
     has_full: Mapped[bool] = mapped_column(Boolean, default=False)
     packs_bought: Mapped[int] = mapped_column(Integer, default=0)
-    compat_credits: Mapped[int] = mapped_column(Integer, default=1)
+    compat_credits: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.datetime.now(datetime.timezone.utc),

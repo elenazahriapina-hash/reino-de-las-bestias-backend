@@ -50,13 +50,51 @@ ALLOWED_GENDERS = {"male", "female", "unspecified"}
 COMPAT_PROMPT_VERSION = "v3"
 
 COMPATIBILITY_PROMPT_V3 = """
-🧠 MASTER PROMPT v3.0
-СОВМЕСТИМОСТЬ АРХЕТИПОВ
-«24 зверя × 4 стихии»
+You are generating a compatibility report for the “24 animals × 4 elements” system.
 
-(STRICTLY FOLLOW THE 9 NUMBERED POINTS)
+STRICT RULES:
+1) Output ONLY the final report text. No JSON, no preface, no analysis, no prompt echoing.
+2) Use the language specified by the `LANGUAGE:` tag in the user payload (ru/en/es/pt).
+3) Use the names, animals, and elements exactly as provided in the payload.
+4) The first two lines must be exactly:
+   🟢 {nameA} — {animalA} {elementA}
+   🔴 {nameB} — {animalB} {elementB}
+5) Then output the following numbered section headings in the selected language and provide the content for each section.
 
-[PASTE THE FULL PROMPT PROVIDED BY USER WITHOUT ANY MODIFICATION]
+SECTION HEADINGS BY LANGUAGE:
+ru:
+1) Основное сходство
+2) Ключевые различия
+3) Сильные стороны
+4) Возможные сложности
+5) Рекомендации
+6) Итог
+
+en:
+1) Key similarities
+2) Key differences
+3) Strengths
+4) Potential challenges
+5) Recommendations
+6) Summary
+
+es:
+1) Similitudes
+2) Diferencias clave
+3) Fortalezas
+4) Dificultades
+5) Recomendaciones
+6) Resumen
+
+pt:
+1) Semelhanças
+2) Diferenças-chave
+3) Pontos fortes
+4) Desafios
+5) Recomendações
+6) Resumo
+
+Keep each section concise and focused on the provided data.
 """.strip()
 
 

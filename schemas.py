@@ -121,9 +121,13 @@ class CompatibilityLookupRequest(BaseModel):
 class CompatibilityCheckRequest(BaseModel):
     target_user_id: int = Field(..., alias="targetUserId")
     requestId: str | None = None
-    lang: Literal["ru", "en", "es", "pt"] | None = None
+    lang: Literal["ru", "en", "es", "pt"]
 
     model_config = {"populate_by_name": True}
+
+
+class CompatibilityPackPurchaseRequest(BaseModel):
+    packSize: Literal[3, 10]
 
 
 class CompatibilityInviteRequest(BaseModel):
@@ -145,16 +149,25 @@ class CompatibilityInviteResponse(BaseModel):
     created_at: datetime
 
 
+class CompatibilityCounterpart(BaseModel):
+    id: int
+    name: str
+    email: str | None
+    telegram: str | None
+    lang: str
+
+
 class CompatibilityReportResponse(BaseModel):
     id: int
     reportId: int
     other_user_id: int
+    lang: str
     prompt_version: str
     status: str
     text: str
     created_at: datetime
     createdAt: datetime
-    counterpart: str | None = None
+    counterpart: CompatibilityCounterpart | None = None
 
     class Config:
         allow_population_by_field_name = True

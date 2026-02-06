@@ -41,7 +41,6 @@ from utils_animals import (
     get_animal_display_name,
     get_element_display_name,
     ELEMENT_LABELS,
-    get_animal_ru_name,
 )
 from schemas import (
     AnalyzeRequest,
@@ -51,6 +50,7 @@ from schemas import (
     CompatibilityInviteRequest,
     CompatibilityInviteResponse,
     CompatibilityListResponse,
+    CompatibilityPackPurchaseRequest,
     CompatibilityReportResponse,
     DevSeedUserRequest,
     DevSeedUserResponse,
@@ -497,15 +497,31 @@ def build_compatibility_payload(
     a_name: str | None,
     b_name: str | None,
 ) -> str:
-    a_animal_ru = get_animal_ru_name(a_result.animal_code, a_result.genderForm)
+    a_animal_display = get_animal_display_name(
+        animal_code=a_result.animal_code,
+        lang=lang,
+        gender=a_result.genderForm,
+    )
+    a_element_display = get_element_display_name(
+        element_code=a_result.element_ru,
+        lang=lang,
+    )
     a_full = a_result.full_text or a_result.short_text or "NOT_PROVIDED"
     if b_result:
-        b_animal_ru = get_animal_ru_name(b_result.animal_code, b_result.genderForm)
+        b_animal_display = get_animal_display_name(
+            animal_code=b_result.animal_code,
+            lang=lang,
+            gender=b_result.genderForm,
+        )
+        b_element_display = get_element_display_name(
+            element_code=b_result.element_ru,
+            lang=lang,
+        )
         b_element = b_result.element_ru
         b_full = b_result.full_text or b_result.short_text or "NOT_PROVIDED"
     else:
-        b_animal_ru = "НЕИЗВЕСТНО"
-        b_element = "неизвестно"
+        b_animal_display = "НЕИЗВЕСТНО"
+        b_element_display = "неизвестно"
         b_full = "(нет данных)"
     a_name_value = a_name or ""
     b_name_value = b_name or ""
@@ -516,13 +532,13 @@ LANGUAGE: {language_tag}
 
 Человек A:
 Имя: {a_name_value}
-Архетип: {a_animal_ru} {a_result.element_ru}
+Архетип: {a_animal_display} {a_element_display}
 Ответы:
 {a_full}
 
 Человек B:
 Имя: {b_name_value}
-Архетип: {b_animal_ru} {b_element}
+Архетип: {b_animal_display} {b_element_display}
 Ответы:
 {b_full}
 """.strip()
@@ -533,11 +549,13 @@ def is_dev_seed_enabled() -> bool:
 
 
 def clamp_credits(value: int) -> int:
-    return max(0, min(3, value))
+    return max(0, value)
 
 
 def serialize_report(
-    report: CompatReport, current_user_id: int
+    report: CompatReport,
+    current_user_id: int,
+    counterpart: User | None = None,
 ) -> CompatibilityReportResponse:
     other_user_id = (
         report.user_high_id
@@ -551,12 +569,23 @@ def serialize_report(
         id=report.id,
         reportId=report.id,
         other_user_id=other_user_id,
+        lang=report.language or "ru",
         prompt_version=report.prompt_version,
         status=status,
         text=text,
         created_at=created_at,
         createdAt=created_at,
-        counterpart=None,
+        counterpart=(
+            None
+            if not counterpart
+            else {
+                "id": counterpart.id,
+                "name": counterpart.name,
+                "email": counterpart.email,
+                "telegram": counterpart.telegram,
+                "lang": counterpart.lang,
+            }
+        ),
     )
 
 
@@ -1063,7 +1092,7 @@ async def analyze_full(
                         if not user.has_full:
                             user.has_full = True
                             user.compat_credits = clamp_credits(
-                                max(user.compat_credits or 0, 3)
+                                (user.compat_credits or 0) + 3
                             )
 
         return {
@@ -1139,6 +1168,7 @@ async def register(payload: RegisterRequest):
             if not payload.name or not payload.lang:
                 raise HTTPException(status_code=400, detail="Name and lang required")
             auth_token = uuid.uuid4().hex
+            initial_credits = 1 if payload.shortResult else 0
             user = User(
                 email=payload.email,
                 telegram=payload.telegram,
@@ -1147,7 +1177,7 @@ async def register(payload: RegisterRequest):
                 auth_token=auth_token,
                 has_full=False,
                 packs_bought=0,
-                compat_credits=clamp_credits(1),
+                compat_credits=clamp_credits(initial_credits),
             )
             session.add(user)
             await session.commit()
@@ -1317,7 +1347,7 @@ async def purchase_full(
             )
             if not user.has_full:
                 user.has_full = True
-                user.compat_credits = clamp_credits(max(user.compat_credits or 0, 3))
+                user.compat_credits = clamp_credits((user.compat_credits or 0) + 3)
         await session.refresh(user)
         return UserResponse(
             id=user.id,
@@ -1360,16 +1390,17 @@ async def purchase_compat_pack(
 
 @app.post("/compatibility/purchase_pack", response_model=UserMeResponse)
 async def compatibility_purchase_pack(
+    payload: CompatibilityPackPurchaseRequest,
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
 ):
     async with SessionLocal() as session:
-        async with session.begin():
-            user = await get_current_user(
-                session, authorization=authorization, x_auth_token=x_auth_token
-            )
-            user.packs_bought += 1
-            user.compat_credits = clamp_credits(3)
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        user.packs_bought += 1
+        user.compat_credits = clamp_credits(user.compat_credits + payload.packSize)
+        await session.commit()
         await session.refresh(user)
         return UserMeResponse(
             credits=user.compat_credits,
@@ -1399,7 +1430,15 @@ async def compatibility_check(
                 )
             )
             if existing:
-                return serialize_report(existing, user_id)
+                other_user_id = (
+                    existing.user_high_id
+                    if existing.user_low_id == user_id
+                    else existing.user_low_id
+                )
+                counterpart = await session.get(User, other_user_id)
+                if not counterpart:
+                    raise HTTPException(status_code=404, detail="User not found")
+                return serialize_report(existing, user_id, counterpart)
         target = await session.get(User, payload.target_user_id)
         if not target:
             raise HTTPException(status_code=404, detail="Target user not found")
@@ -1420,10 +1459,10 @@ async def compatibility_check(
             )
         )
         if existing:
-            return serialize_report(existing, user_id)
+            return serialize_report(existing, user_id, target)
 
         if user.compat_credits <= 0:
-            raise HTTPException(status_code=402, detail="NO_COMPAT_CREDITS")
+            raise HTTPException(status_code=402, detail={"code": "NO_COMPAT_CREDITS"})
         report_language = payload.lang or user.lang or "ru"
         payload_text = build_compatibility_payload(
             lang=report_language,
@@ -1434,46 +1473,20 @@ async def compatibility_check(
         )
         text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
 
-    try:
-        async with SessionLocal.begin() as session:
-            user = await session.get(User, user_id)
-            if not user:
-                raise HTTPException(status_code=404, detail="User not found")
-            if user.compat_credits <= 0:
-                raise HTTPException(status_code=402, detail="NO_COMPAT_CREDITS")
-            existing = await session.scalar(
-                select(CompatReport).where(
-                    CompatReport.user_low_id == user_low_id,
-                    CompatReport.user_high_id == user_high_id,
-                    CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
-                )
-            )
-            if existing:
-                return serialize_report(existing, user_id)
-            if payload.requestId:
-                existing = await session.scalar(
-                    select(CompatReport).where(
-                        CompatReport.request_id == payload.requestId,
-                        (CompatReport.user_low_id == user_id)
-                        | (CompatReport.user_high_id == user_id),
-                    )
-                )
-                if existing:
-                    return serialize_report(existing, user_id)
-
-            report = CompatReport(
-                user_low_id=user_low_id,
-                user_high_id=user_high_id,
-                language=report_language,
-                prompt_version=COMPAT_PROMPT_VERSION,
-                status="ready",
-                text=text,
-                request_id=payload.requestId,
-            )
-            session.add(report)
-            user.compat_credits -= 1
-    except IntegrityError:
-        async with SessionLocal() as session:
+        report = CompatReport(
+            user_low_id=user_low_id,
+            user_high_id=user_high_id,
+            language=report_language,
+            prompt_version=COMPAT_PROMPT_VERSION,
+            status="ready",
+            text=text,
+            request_id=payload.requestId,
+        )
+        session.add(report)
+        user.compat_credits = clamp_credits(user.compat_credits - 1)
+        try:
+            await session.commit()
+        except IntegrityError:
             await session.rollback()
             existing = await session.scalar(
                 select(CompatReport).where(
@@ -1483,7 +1496,7 @@ async def compatibility_check(
                 )
             )
             if existing:
-                return serialize_report(existing, user_id)
+                return serialize_report(existing, user_id, target)
             if payload.requestId:
                 existing = await session.scalar(
                     select(CompatReport).where(
@@ -1493,9 +1506,10 @@ async def compatibility_check(
                     )
                 )
                 if existing:
-                    return serialize_report(existing, user_id)
-        raise HTTPException(status_code=409, detail="Compatibility already exists")
-    return serialize_report(report, user_id)
+                    return serialize_report(existing, user_id, target)
+            raise HTTPException(status_code=409, detail="Compatibility already exists")
+        await session.refresh(report)
+        return serialize_report(report, user_id, target)
 
 
 @app.post("/compatibility/invite", response_model=CompatibilityInviteResponse)
@@ -1545,9 +1559,9 @@ async def compatibility_invite(
             request_id=payload.requestId,
         )
         try:
-            async with session.begin():
-                user.compat_credits -= 1
-                session.add(invite)
+            user.compat_credits -= 1
+            session.add(invite)
+            await session.commit()
         except IntegrityError:
             await session.rollback()
             if payload.requestId:
@@ -1603,7 +1617,10 @@ async def compatibility_accept_invite(
             )
             if not existing:
                 raise HTTPException(status_code=404, detail="Report missing")
-            return serialize_report(existing, invitee.id)
+            counterpart = await session.get(User, invite.inviter_id)
+            if not counterpart:
+                raise HTTPException(status_code=404, detail="User not found")
+            return serialize_report(existing, invitee.id, counterpart)
         if invite.invitee_id and invite.invitee_id != invitee.id:
             raise HTTPException(status_code=409, detail="Invite already used")
 
@@ -1638,21 +1655,24 @@ async def compatibility_accept_invite(
                 text="",
             )
 
-        async with session.begin():
-            invite.invitee_id = invitee.id
-            invite.status = "completed"
-            if report.id is None:
-                session.add(report)
-            if (
-                invite.credit_spent
-                and not invite.credit_refunded
-                and (inviter.has_full or inviter.packs_bought > 0)
-            ):
-                inviter.compat_credits = clamp_credits(inviter.compat_credits + 1)
-                invite.credit_refunded = True
+        invite.invitee_id = invitee.id
+        invite.status = "completed"
+        if report.id is None:
+            session.add(report)
+        if (
+            invite.credit_spent
+            and not invite.credit_refunded
+            and (inviter.has_full or inviter.packs_bought > 0)
+        ):
+            inviter.compat_credits = clamp_credits(inviter.compat_credits + 1)
+            invite.credit_refunded = True
+        await session.commit()
 
         if report.status == "ready":
-            return serialize_report(report, invitee.id)
+            counterpart = await session.get(User, inviter.id)
+            if not counterpart:
+                raise HTTPException(status_code=404, detail="User not found")
+            return serialize_report(report, invitee.id, counterpart)
 
         payload_text = build_compatibility_payload(
             lang=invitee.lang,
@@ -1663,18 +1683,21 @@ async def compatibility_accept_invite(
         )
         try:
             text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
-            async with session.begin():
-                saved_report = await session.get(CompatReport, report.id)
-                if saved_report:
-                    saved_report.status = "ready"
-                    saved_report.text = text
-            return serialize_report(saved_report or report, invitee.id)
+            saved_report = await session.get(CompatReport, report.id)
+            if saved_report:
+                saved_report.status = "ready"
+                saved_report.text = text
+            await session.commit()
+            counterpart = await session.get(User, inviter.id)
+            if not counterpart:
+                raise HTTPException(status_code=404, detail="User not found")
+            return serialize_report(saved_report or report, invitee.id, counterpart)
         except Exception as exc:
-            async with session.begin():
-                saved_report = await session.get(CompatReport, report.id)
-                if saved_report:
-                    saved_report.status = "failed"
-                    saved_report.text = ""
+            saved_report = await session.get(CompatReport, report.id)
+            if saved_report:
+                saved_report.status = "failed"
+                saved_report.text = ""
+            await session.commit()
             raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -1696,7 +1719,33 @@ async def compatibility_list(
             .order_by(CompatReport.created_at.desc())
         )
         reports = query.scalars().all()
-        serialized = [serialize_report(report, user.id) for report in reports]
+        counterpart_ids = {
+            report.user_high_id if report.user_low_id == user.id else report.user_low_id
+            for report in reports
+        }
+        counterparts = []
+        if counterpart_ids:
+            counterparts = (
+                (
+                    await session.execute(
+                        select(User).where(User.id.in_(counterpart_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        counterpart_map = {counterpart.id: counterpart for counterpart in counterparts}
+        serialized = []
+        for report in reports:
+            other_id = (
+                report.user_high_id
+                if report.user_low_id == user.id
+                else report.user_low_id
+            )
+            counterpart = counterpart_map.get(other_id)
+            if not counterpart:
+                continue
+            serialized.append(serialize_report(report, user.id, counterpart))
         return CompatibilityListResponse(
             items=serialized,
             history=serialized,
