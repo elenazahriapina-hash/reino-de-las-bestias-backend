@@ -493,14 +493,20 @@ def build_compatibility_payload(
     *,
     lang: str,
     a_result: UserResult,
-    b_result: UserResult,
+    b_result: UserResult | None,
     a_name: str | None,
     b_name: str | None,
 ) -> str:
     a_animal_ru = get_animal_ru_name(a_result.animal_code, a_result.genderForm)
-    b_animal_ru = get_animal_ru_name(b_result.animal_code, b_result.genderForm)
     a_full = a_result.full_text or a_result.short_text or "NOT_PROVIDED"
-    b_full = b_result.full_text or b_result.short_text or "NOT_PROVIDED"
+    if b_result:
+        b_animal_ru = get_animal_ru_name(b_result.animal_code, b_result.genderForm)
+        b_element = b_result.element_ru
+        b_full = b_result.full_text or b_result.short_text or "NOT_PROVIDED"
+    else:
+        b_animal_ru = "НЕИЗВЕСТНО"
+        b_element = "неизвестно"
+        b_full = "(нет данных)"
     a_name_value = a_name or ""
     b_name_value = b_name or ""
     language_tag = lang.upper()
@@ -516,7 +522,7 @@ LANGUAGE: {language_tag}
 
 Человек B:
 Имя: {b_name_value}
-Архетип: {b_animal_ru} {b_result.element_ru}
+Архетип: {b_animal_ru} {b_element}
 Ответы:
 {b_full}
 """.strip()
@@ -1350,32 +1356,29 @@ async def compatibility_check(
         user = await get_current_user(
             session, authorization=authorization, x_auth_token=x_auth_token
         )
+        user_id = user.id
         if payload.requestId:
             existing = await session.scalar(
                 select(CompatReport).where(
                     CompatReport.request_id == payload.requestId,
-                    (CompatReport.user_low_id == user.id)
-                    | (CompatReport.user_high_id == user.id),
+                    (CompatReport.user_low_id == user_id)
+                    | (CompatReport.user_high_id == user_id),
                 )
             )
             if existing:
-                return serialize_report(existing, user.id)
+                return serialize_report(existing, user_id)
         target = await session.get(User, payload.target_user_id)
         if not target:
             raise HTTPException(status_code=404, detail="Target user not found")
-        if target.id == user.id:
+        if target.id == user_id:
             raise HTTPException(status_code=400, detail="Cannot compare same user")
 
-        a_result = await session.get(UserResult, user.id)
+        a_result = await session.get(UserResult, user_id)
         b_result = await session.get(UserResult, target.id)
         if not a_result:
             raise HTTPException(status_code=400, detail="Complete test first")
-        if not b_result:
-            raise HTTPException(
-                status_code=400, detail="Target user must complete test first"
-            )
 
-        user_low_id, user_high_id = sorted([user.id, target.id])
+        user_low_id, user_high_id = sorted([user_id, target.id])
         existing = await session.scalar(
             select(CompatReport).where(
                 CompatReport.user_low_id == user_low_id,
@@ -1384,7 +1387,7 @@ async def compatibility_check(
             )
         )
         if existing:
-            return serialize_report(existing, user.id)
+            return serialize_report(existing, user_id)
 
         if user.compat_credits < 1:
             raise HTTPException(status_code=402, detail="Not enough credits")
@@ -1398,21 +1401,46 @@ async def compatibility_check(
         )
         text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
 
-        report = CompatReport(
-            user_low_id=user_low_id,
-            user_high_id=user_high_id,
-            language=report_language,
-            prompt_version=COMPAT_PROMPT_VERSION,
-            status="ready",
-            text=text,
-            request_id=payload.requestId,
-        )
+    try:
+        async with SessionLocal.begin() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            if user.compat_credits < 1:
+                raise HTTPException(status_code=402, detail="Not enough credits")
+            existing = await session.scalar(
+                select(CompatReport).where(
+                    CompatReport.user_low_id == user_low_id,
+                    CompatReport.user_high_id == user_high_id,
+                    CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
+                )
+            )
+            if existing:
+                return serialize_report(existing, user_id)
+            if payload.requestId:
+                existing = await session.scalar(
+                    select(CompatReport).where(
+                        CompatReport.request_id == payload.requestId,
+                        (CompatReport.user_low_id == user_id)
+                        | (CompatReport.user_high_id == user_id),
+                    )
+                )
+                if existing:
+                    return serialize_report(existing, user_id)
 
-        try:
-            async with session.begin():
-                session.add(report)
-                user.compat_credits -= 1
-        except IntegrityError:
+            report = CompatReport(
+                user_low_id=user_low_id,
+                user_high_id=user_high_id,
+                language=report_language,
+                prompt_version=COMPAT_PROMPT_VERSION,
+                status="ready",
+                text=text,
+                request_id=payload.requestId,
+            )
+            session.add(report)
+            user.compat_credits -= 1
+    except IntegrityError:
+        async with SessionLocal() as session:
             await session.rollback()
             existing = await session.scalar(
                 select(CompatReport).where(
@@ -1422,19 +1450,19 @@ async def compatibility_check(
                 )
             )
             if existing:
-                return serialize_report(existing, user.id)
+                return serialize_report(existing, user_id)
             if payload.requestId:
                 existing = await session.scalar(
                     select(CompatReport).where(
                         CompatReport.request_id == payload.requestId,
-                        (CompatReport.user_low_id == user.id)
-                        | (CompatReport.user_high_id == user.id),
+                        (CompatReport.user_low_id == user_id)
+                        | (CompatReport.user_high_id == user_id),
                     )
                 )
                 if existing:
-                    return serialize_report(existing, user.id)
-            raise HTTPException(status_code=409, detail="Compatibility already exists")
-        return serialize_report(report, user.id)
+                    return serialize_report(existing, user_id)
+        raise HTTPException(status_code=409, detail="Compatibility already exists")
+    return serialize_report(report, user_id)
 
 
 @app.post("/compatibility/invite", response_model=CompatibilityInviteResponse)
