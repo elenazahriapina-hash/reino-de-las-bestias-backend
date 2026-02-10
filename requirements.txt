@@ -2,8 +2,8 @@ fastapi
 uvicorn
 pydantic
 openai
+google-auth
 
 sqlalchemy>=2.0
 asyncpg
 python-dotenv
-

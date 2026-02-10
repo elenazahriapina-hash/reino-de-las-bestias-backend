@@ -48,6 +48,16 @@ psql postgresql://reino:reino_pass@localhost:5432/reino
 
 If you override credentials, update both `.env` and your `psql` connection string so they point at the same database.
 
+## 🔐 Auth environment variables
+
+Add the following to your `.env` when enabling OAuth logins:
+
+```
+GOOGLE_WEB_CLIENT_ID=your_google_web_client_id
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_AUTH_MAX_AGE_SECONDS=86400
+```
+
 ## 🛠️ Troubleshooting
 
 * **`/analyze/short` returns 200 but `short_results` is empty:** confirm Postgres is running and `create_tables.py` has been run, then check that `.env` points to the same database as your `psql` session. The response `result_id` should always exist as a row in `short_results`.

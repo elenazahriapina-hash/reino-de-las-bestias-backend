@@ -58,6 +58,22 @@ class RegisterRequest(BaseModel):
     shortResult: ShortResult | None = None
 
 
+class GoogleAuthRequest(BaseModel):
+    idToken: str
+    lang: Literal["ru", "en", "es", "pt"] | None = None
+    name: str | None = None
+
+
+class TelegramAuthRequest(BaseModel):
+    id: str | int
+    username: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    photo_url: str | None = None
+    auth_date: int
+    hash: str
+
+
 class UserResponse(BaseModel):
     id: int
     email: str | None
@@ -128,6 +144,7 @@ class CompatibilityCheckRequest(BaseModel):
 
 class CompatibilityPackPurchaseRequest(BaseModel):
     packSize: Literal[3, 10]
+    requestId: str | None = None
 
 
 class CompatibilityInviteRequest(BaseModel):

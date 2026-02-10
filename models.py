@@ -69,6 +69,9 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    google_sub: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True
+    )
     telegram: Mapped[str | None] = mapped_column(
         String(255), unique=True, nullable=True
     )
@@ -76,6 +79,7 @@ class User(Base):
     lang: Mapped[str] = mapped_column(String(5))
     auth_token: Mapped[str] = mapped_column(String(64), unique=True)
     has_full: Mapped[bool] = mapped_column(Boolean, default=False)
+    full_bonus_awarded: Mapped[bool] = mapped_column(Boolean, default=False)
     packs_bought: Mapped[int] = mapped_column(Integer, default=0)
     compat_credits: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -105,7 +109,7 @@ class UserResult(Base):
 class CompatReport(Base):
     __tablename__ = "compat_reports"
     __table_args__ = (
-        UniqueConstraint("user_low_id", "user_high_id", "prompt_version"),
+        UniqueConstraint("user_low_id", "user_high_id", "prompt_version", "language"),
         UniqueConstraint("request_id"),
     )
 
@@ -143,6 +147,22 @@ class Invite(Base):
     credit_spent: Mapped[bool] = mapped_column(Boolean, default=False)
     credit_refunded: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20))
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+
+
+class PackPurchase(Base):
+    __tablename__ = "pack_purchases"
+    __table_args__ = (UniqueConstraint("request_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE")
+    )
+    pack_size: Mapped[int] = mapped_column(Integer)
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),

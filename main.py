@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import os
+import time
 import uuid
 from datetime import datetime
 
@@ -13,6 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 from ai import (
     ALLOWED_ANIMALS,
     ALLOWED_ELEMENTS,
@@ -35,6 +40,7 @@ from models import (
     UserResult,
     CompatReport,
     Invite,
+    PackPurchase,
 )
 from utils_animals import (
     animal_emoji,
@@ -58,15 +64,21 @@ from schemas import (
     FullRequest,
     FullResponse,
     LookupUserResponse,
+    GoogleAuthRequest,
     RegisterRequest,
     RegisterResponse,
     ShortResponse,
+    TelegramAuthRequest,
     TestAnswer,
     UserMeResponse,
     UserResponse,
 )
 
 app = FastAPI()
+
+GOOGLE_WEB_CLIENT_ID = os.getenv("GOOGLE_WEB_CLIENT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_AUTH_MAX_AGE_SECONDS = int(os.getenv("TELEGRAM_AUTH_MAX_AGE_SECONDS", "86400"))
 
 
 # -------------------- MODELS --------------------
@@ -95,11 +107,35 @@ def _ensure_compat_schema(sync_conn) -> None:
             )
 
 
+def _ensure_user_schema(sync_conn) -> None:
+    table = User.__tablename__
+    insp = inspect(sync_conn)
+    columns = insp.get_columns(table)
+    cols = {c["name"] for c in columns}
+    if "google_sub" not in cols:
+        sync_conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN google_sub TEXT"))
+    if "full_bonus_awarded" not in cols:
+        sync_conn.execute(
+            sql_text(
+                f"ALTER TABLE {table} ADD COLUMN full_bonus_awarded BOOLEAN DEFAULT FALSE"
+            )
+        )
+    sync_conn.execute(
+        sql_text(
+            f"UPDATE {table} SET full_bonus_awarded=FALSE WHERE full_bonus_awarded IS NULL"
+        )
+    )
+    sync_conn.execute(
+        sql_text(f"UPDATE {table} SET full_bonus_awarded=TRUE WHERE has_full=TRUE")
+    )
+
+
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_compat_schema)
+        await conn.run_sync(_ensure_user_schema)
 
 
 app.add_middleware(
@@ -563,6 +599,48 @@ def is_dev_seed_enabled() -> bool:
 
 def clamp_credits(value: int) -> int:
     return max(0, value)
+
+
+def apply_full_bonus(user: User) -> bool:
+    if not user.full_bonus_awarded:
+        user.has_full = True
+        user.full_bonus_awarded = True
+        user.compat_credits = clamp_credits((user.compat_credits or 0) + 3)
+        return True
+    if not user.has_full:
+        user.has_full = True
+    return False
+
+
+def build_register_response(user: User) -> RegisterResponse:
+    return RegisterResponse(
+        userId=user.id,
+        token=user.auth_token,
+        credits=user.compat_credits,
+        hasFull=user.has_full,
+    )
+
+
+def build_telegram_check_string(payload: TelegramAuthRequest) -> str:
+    data = payload.model_dump(exclude_none=True)
+    data.pop("hash", None)
+    lines = [f"{key}={data[key]}" for key in sorted(data.keys())]
+    return "\n".join(lines)
+
+
+def verify_telegram_auth(payload: TelegramAuthRequest) -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="Telegram auth not configured")
+    now = int(time.time())
+    if now - payload.auth_date > TELEGRAM_AUTH_MAX_AGE_SECONDS:
+        raise HTTPException(status_code=401, detail="Telegram auth expired")
+    data_check_string = build_telegram_check_string(payload)
+    secret_key = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).digest()
+    expected_hash = hmac.new(
+        secret_key, data_check_string.encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected_hash, payload.hash):
+        raise HTTPException(status_code=401, detail="Invalid Telegram hash")
 
 
 def serialize_report(
@@ -1126,11 +1204,7 @@ async def analyze_full(
                                     full_text=text,
                                 )
                             )
-                        if not user.has_full:
-                            user.has_full = True
-                            user.compat_credits = clamp_credits(
-                                (user.compat_credits or 0) + 3
-                            )
+                        apply_full_bonus(user)
 
         return {
             "type": "full",
@@ -1231,12 +1305,103 @@ async def register(payload: RegisterRequest):
                 )
                 await session.commit()
 
-    return RegisterResponse(
-        userId=user.id,
-        token=user.auth_token,
-        credits=user.compat_credits,
-        hasFull=user.has_full,
+    return build_register_response(user)
+
+
+@app.post("/auth/google", response_model=RegisterResponse)
+async def auth_google(payload: GoogleAuthRequest):
+    if not GOOGLE_WEB_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Google auth not configured")
+    try:
+        id_info = google_id_token.verify_oauth2_token(
+            payload.idToken, google_requests.Request(), GOOGLE_WEB_CLIENT_ID
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Google token") from exc
+
+    google_sub = id_info.get("sub")
+    email = id_info.get("email")
+    name = (
+        payload.name
+        or id_info.get("name")
+        or (email.split("@")[0] if email else "User")
     )
+    if not google_sub:
+        raise HTTPException(status_code=400, detail="Google sub missing")
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await session.scalar(
+                select(User).where(User.google_sub == google_sub)
+            )
+            if not user and email:
+                user = await session.scalar(select(User).where(User.email == email))
+            if user:
+                if not user.google_sub:
+                    user.google_sub = google_sub
+                if email and not user.email:
+                    user.email = email
+                if payload.name:
+                    user.name = payload.name
+                elif id_info.get("name") and not user.name:
+                    user.name = id_info["name"]
+                if payload.lang:
+                    user.lang = payload.lang
+            else:
+                auth_token = uuid.uuid4().hex
+                user = User(
+                    email=email,
+                    google_sub=google_sub,
+                    telegram=None,
+                    name=name,
+                    lang=payload.lang or "ru",
+                    auth_token=auth_token,
+                    has_full=False,
+                    full_bonus_awarded=False,
+                    packs_bought=0,
+                    compat_credits=clamp_credits(1),
+                )
+                session.add(user)
+        await session.refresh(user)
+        return build_register_response(user)
+
+
+@app.post("/auth/telegram", response_model=RegisterResponse)
+async def auth_telegram(payload: TelegramAuthRequest):
+    verify_telegram_auth(payload)
+    telegram_id = str(payload.id)
+    preferred_telegram = payload.username or telegram_id
+    name_parts = [payload.first_name, payload.last_name]
+    composed_name = " ".join(part for part in name_parts if part)
+    display_name = composed_name or payload.username or "User"
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await session.scalar(
+                select(User).where(User.telegram.in_([preferred_telegram, telegram_id]))
+            )
+            if user:
+                if user.telegram != preferred_telegram:
+                    user.telegram = preferred_telegram
+                if display_name and (not user.name or user.name == "User"):
+                    user.name = display_name
+            else:
+                auth_token = uuid.uuid4().hex
+                user = User(
+                    email=None,
+                    google_sub=None,
+                    telegram=preferred_telegram,
+                    name=display_name,
+                    lang="ru",
+                    auth_token=auth_token,
+                    has_full=False,
+                    full_bonus_awarded=False,
+                    packs_bought=0,
+                    compat_credits=clamp_credits(1),
+                )
+                session.add(user)
+        await session.refresh(user)
+        return build_register_response(user)
 
 
 @app.post("/dev/seed_user", response_model=DevSeedUserResponse)
@@ -1382,9 +1547,7 @@ async def purchase_full(
             user = await get_current_user(
                 session, authorization=authorization, x_auth_token=x_auth_token
             )
-            if not user.has_full:
-                user.has_full = True
-                user.compat_credits = clamp_credits((user.compat_credits or 0) + 3)
+            apply_full_bonus(user)
         await session.refresh(user)
         return UserResponse(
             id=user.id,
@@ -1432,12 +1595,38 @@ async def compatibility_purchase_pack(
     x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
 ):
     async with SessionLocal() as session:
-        user = await get_current_user(
-            session, authorization=authorization, x_auth_token=x_auth_token
-        )
-        user.packs_bought += 1
-        user.compat_credits = clamp_credits(user.compat_credits + payload.packSize)
-        await session.commit()
+        async with session.begin():
+            user = await get_current_user(
+                session, authorization=authorization, x_auth_token=x_auth_token
+            )
+            if payload.requestId:
+                existing_purchase = await session.scalar(
+                    select(PackPurchase).where(
+                        PackPurchase.request_id == payload.requestId
+                    )
+                )
+                if existing_purchase:
+                    if existing_purchase.user_id != user.id:
+                        raise HTTPException(
+                            status_code=409, detail="Request ID already used"
+                        )
+                    await session.refresh(user)
+                    return UserMeResponse(
+                        credits=user.compat_credits,
+                        hasFull=user.has_full,
+                        userId=user.id,
+                        lang=user.lang,
+                    )
+            user.packs_bought += 1
+            user.compat_credits = clamp_credits(user.compat_credits + payload.packSize)
+            if payload.requestId:
+                session.add(
+                    PackPurchase(
+                        user_id=user.id,
+                        pack_size=payload.packSize,
+                        request_id=payload.requestId,
+                    )
+                )
         await session.refresh(user)
         return UserMeResponse(
             credits=user.compat_credits,
@@ -1454,79 +1643,100 @@ async def compatibility_check(
     x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
 ):
     async with SessionLocal() as session:
-        user = await get_current_user(
-            session, authorization=authorization, x_auth_token=x_auth_token
-        )
-        user_id = user.id
-        if payload.requestId:
-            existing = await session.scalar(
-                select(CompatReport).where(
-                    CompatReport.request_id == payload.requestId,
-                    (CompatReport.user_low_id == user_id)
-                    | (CompatReport.user_high_id == user_id),
-                )
-            )
-            if existing:
-                other_user_id = (
-                    existing.user_high_id
-                    if existing.user_low_id == user_id
-                    else existing.user_low_id
-                )
-                counterpart = await session.get(User, other_user_id)
-                return serialize_report(existing, user_id, counterpart)
-        target = await session.get(User, payload.target_user_id)
-        if not target:
-            raise HTTPException(status_code=404, detail="Target user not found")
-        if target.id == user_id:
-            raise HTTPException(status_code=400, detail="Cannot compare same user")
-
-        a_result = await session.get(UserResult, user_id)
-        b_result = await session.get(UserResult, target.id)
-        if not a_result:
-            raise HTTPException(status_code=400, detail="Complete test first")
-
-        user_low_id, user_high_id = sorted([user_id, target.id])
-        existing = await session.scalar(
-            select(CompatReport).where(
-                CompatReport.user_low_id == user_low_id,
-                CompatReport.user_high_id == user_high_id,
-                CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
-            )
-        )
-        if existing:
-            return serialize_report(existing, user_id, target)
-
-        if user.compat_credits <= 0:
-            raise HTTPException(status_code=402, detail={"code": "NO_COMPAT_CREDITS"})
-        report_language = payload.lang or user.lang or "ru"
-        payload_text = build_compatibility_payload(
-            lang=report_language,
-            a_result=a_result,
-            b_result=b_result,
-            a_name=user.name,
-            b_name=target.name,
-        )
-        payload_lines = payload_text.splitlines()
-        line_a = payload_lines[1].replace("LINE_A: ", "", 1)
-        line_b = payload_lines[2].replace("LINE_B: ", "", 1)
-        text = generate_compatibility_text(COMPATIBILITY_PROMPT_V3, payload_text)
-        text = strip_prompt_echo(text, line_a, line_b)
-
-        report = CompatReport(
-            user_low_id=user_low_id,
-            user_high_id=user_high_id,
-            language=report_language,
-            prompt_version=COMPAT_PROMPT_VERSION,
-            status="ready",
-            text=text,
-            request_id=payload.requestId,
-        )
-        session.add(report)
-        user.compat_credits = clamp_credits(user.compat_credits - 1)
+        user_id = None
+        report_language = None
+        target = None
         try:
-            await session.commit()
+            async with session.begin():
+                user = await get_current_user(
+                    session, authorization=authorization, x_auth_token=x_auth_token
+                )
+                user_id = user.id
+                if payload.requestId:
+                    existing = await session.scalar(
+                        select(CompatReport).where(
+                            CompatReport.request_id == payload.requestId,
+                            (CompatReport.user_low_id == user_id)
+                            | (CompatReport.user_high_id == user_id),
+                        )
+                    )
+                    if existing:
+                        other_user_id = (
+                            existing.user_high_id
+                            if existing.user_low_id == user_id
+                            else existing.user_low_id
+                        )
+                        counterpart = await session.get(User, other_user_id)
+                        return serialize_report(existing, user_id, counterpart)
+                target = await session.get(User, payload.target_user_id)
+                if not target:
+                    raise HTTPException(status_code=404, detail="Target user not found")
+                if target.id == user_id:
+                    raise HTTPException(
+                        status_code=400, detail="Cannot compare same user"
+                    )
+
+                a_result = await session.get(UserResult, user_id)
+                b_result = await session.get(UserResult, target.id)
+                if not a_result:
+                    raise HTTPException(status_code=400, detail="Complete test first")
+
+                user_low_id, user_high_id = sorted([user_id, target.id])
+                report_language = payload.lang or user.lang or "ru"
+                existing = await session.scalar(
+                    select(CompatReport).where(
+                        CompatReport.user_low_id == user_low_id,
+                        CompatReport.user_high_id == user_high_id,
+                        CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
+                        CompatReport.language == report_language,
+                    )
+                )
+                if existing:
+                    return serialize_report(existing, user_id, target)
+
+                if user.compat_credits <= 0:
+                    raise HTTPException(status_code=402, detail="NO_COMPAT_CREDITS")
+                payload_text = build_compatibility_payload(
+                    lang=report_language,
+                    a_result=a_result,
+                    b_result=b_result,
+                    a_name=user.name,
+                    b_name=target.name,
+                )
+                payload_lines = payload_text.splitlines()
+                line_a = payload_lines[1].replace("LINE_A: ", "", 1)
+                line_b = payload_lines[2].replace("LINE_B: ", "", 1)
+                text = generate_compatibility_text(
+                    COMPATIBILITY_PROMPT_V3, payload_text
+                )
+                text = strip_prompt_echo(text, line_a, line_b)
+
+                report = CompatReport(
+                    user_low_id=user_low_id,
+                    user_high_id=user_high_id,
+                    language=report_language,
+                    prompt_version=COMPAT_PROMPT_VERSION,
+                    status="ready",
+                    text=text,
+                    request_id=payload.requestId,
+                )
+                session.add(report)
+                user.compat_credits = clamp_credits(user.compat_credits - 1)
+                await session.flush()
         except IntegrityError:
             await session.rollback()
+            if user_id and target:
+                user_low_id, user_high_id = sorted([user_id, target.id])
+                existing = await session.scalar(
+                    select(CompatReport).where(
+                        CompatReport.user_low_id == user_low_id,
+                        CompatReport.user_high_id == user_high_id,
+                        CompatReport.prompt_version == COMPAT_PROMPT_VERSION,
+                        CompatReport.language == report_language,
+                    )
+                )
+            if existing:
+                return serialize_report(existing, user_id, target)
             existing = await session.scalar(
                 select(CompatReport).where(
                     CompatReport.user_low_id == user_low_id,
@@ -1536,7 +1746,7 @@ async def compatibility_check(
             )
             if existing:
                 return serialize_report(existing, user_id, target)
-            if payload.requestId:
+            if payload.requestId and user_id:
                 existing = await session.scalar(
                     select(CompatReport).where(
                         CompatReport.request_id == payload.requestId,
@@ -1545,7 +1755,13 @@ async def compatibility_check(
                     )
                 )
                 if existing:
-                    return serialize_report(existing, user_id, target)
+                    other_user_id = (
+                        existing.user_high_id
+                        if existing.user_low_id == user_id
+                        else existing.user_low_id
+                    )
+                    counterpart = await session.get(User, other_user_id)
+                    return serialize_report(existing, user_id, counterpart)
             raise HTTPException(status_code=409, detail="Compatibility already exists")
         await session.refresh(report)
         return serialize_report(report, user_id, target)
