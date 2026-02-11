@@ -74,6 +74,15 @@ class TelegramAuthRequest(BaseModel):
     hash: str
 
 
+class TelegramStartResponse(BaseModel):
+    authUrl: str
+    callbackUrl: str
+
+
+class TelegramCallbackResponse(BaseModel):
+    redirectTo: str
+
+
 class UserResponse(BaseModel):
     id: int
     email: str | None
@@ -114,6 +123,7 @@ class DevSeedUserResponse(BaseModel):
 
 class UserMeResponse(BaseModel):
     credits: int
+    compat_credits: int = Field(..., alias="compatCredits")
     has_full: bool = Field(..., alias="hasFull")
     user_id: int = Field(..., alias="userId")
     lang: str

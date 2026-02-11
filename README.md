@@ -53,7 +53,7 @@ If you override credentials, update both `.env` and your `psql` connection strin
 Add the following to your `.env` when enabling OAuth logins:
 
 ```
-GOOGLE_WEB_CLIENT_ID=your_google_web_client_id
+GOOGLE_WEB_CLIENT_ID=143867517052-471n3m08rqq1h38pgsr2d9692m40npdb.apps.googleusercontent.com
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_AUTH_MAX_AGE_SECONDS=86400
 ```

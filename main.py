@@ -69,6 +69,8 @@ from schemas import (
     RegisterResponse,
     ShortResponse,
     TelegramAuthRequest,
+    TelegramCallbackResponse,
+    TelegramStartResponse,
     TestAnswer,
     UserMeResponse,
     UserResponse,
@@ -79,6 +81,9 @@ app = FastAPI()
 GOOGLE_WEB_CLIENT_ID = os.getenv("GOOGLE_WEB_CLIENT_ID", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_AUTH_MAX_AGE_SECONDS = int(os.getenv("TELEGRAM_AUTH_MAX_AGE_SECONDS", "86400"))
+TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+TELEGRAM_REDIRECT_URI = os.getenv("TELEGRAM_REDIRECT_URI", "").strip()
+APP_DEEP_LINK_REDIRECT = os.getenv("APP_DEEP_LINK_REDIRECT", "").strip()
 
 
 # -------------------- MODELS --------------------
@@ -114,12 +119,21 @@ def _ensure_user_schema(sync_conn) -> None:
     cols = {c["name"] for c in columns}
     if "google_sub" not in cols:
         sync_conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN google_sub TEXT"))
+    if "compat_credits" not in cols:
+        sync_conn.execute(
+            sql_text(f"ALTER TABLE {table} ADD COLUMN compat_credits INTEGER DEFAULT 0")
+        )
     if "full_bonus_awarded" not in cols:
         sync_conn.execute(
             sql_text(
                 f"ALTER TABLE {table} ADD COLUMN full_bonus_awarded BOOLEAN DEFAULT FALSE"
             )
         )
+    sync_conn.execute(
+        sql_text(
+            f"UPDATE {table} SET compat_credits=0 WHERE compat_credits IS NULL OR compat_credits < 0"
+        )
+    )
     sync_conn.execute(
         sql_text(
             f"UPDATE {table} SET full_bonus_awarded=FALSE WHERE full_bonus_awarded IS NULL"
@@ -641,6 +655,21 @@ def verify_telegram_auth(payload: TelegramAuthRequest) -> None:
     ).hexdigest()
     if not hmac.compare_digest(expected_hash, payload.hash):
         raise HTTPException(status_code=401, detail="Invalid Telegram hash")
+
+
+def build_telegram_callback_url() -> str:
+    if TELEGRAM_REDIRECT_URI:
+        return TELEGRAM_REDIRECT_URI
+    return "/auth/telegram/callback"
+
+
+def build_deep_link_redirect(user: User) -> str:
+    deep_link_base = APP_DEEP_LINK_REDIRECT or "bestias://auth/telegram"
+    separator = "&" if "?" in deep_link_base else "?"
+    return (
+        f"{deep_link_base}{separator}token={user.auth_token}"
+        f"&userId={user.id}&compatCredits={user.compat_credits}&hasFull={str(user.has_full).lower()}"
+    )
 
 
 def serialize_report(
@@ -1368,6 +1397,11 @@ async def auth_google(payload: GoogleAuthRequest):
 
 @app.post("/auth/telegram", response_model=RegisterResponse)
 async def auth_telegram(payload: TelegramAuthRequest):
+    user = await upsert_telegram_user(payload)
+    return build_register_response(user)
+
+
+async def upsert_telegram_user(payload: TelegramAuthRequest) -> User:
     verify_telegram_auth(payload)
     telegram_id = str(payload.id)
     preferred_telegram = payload.username or telegram_id
@@ -1401,7 +1435,24 @@ async def auth_telegram(payload: TelegramAuthRequest):
                 )
                 session.add(user)
         await session.refresh(user)
-        return build_register_response(user)
+        return user
+
+
+@app.get("/auth/telegram/start", response_model=TelegramStartResponse)
+async def telegram_auth_start():
+    if not TELEGRAM_BOT_USERNAME:
+        raise HTTPException(
+            status_code=500, detail="Telegram bot username not configured"
+        )
+    callback_url = build_telegram_callback_url()
+    auth_url = f"https://oauth.telegram.org/auth?bot_id=@{TELEGRAM_BOT_USERNAME}&origin={callback_url}"
+    return TelegramStartResponse(authUrl=auth_url, callbackUrl=callback_url)
+
+
+@app.post("/auth/telegram/callback", response_model=TelegramCallbackResponse)
+async def telegram_auth_callback(payload: TelegramAuthRequest):
+    user = await upsert_telegram_user(payload)
+    return TelegramCallbackResponse(redirectTo=build_deep_link_redirect(user))
 
 
 @app.post("/dev/seed_user", response_model=DevSeedUserResponse)
@@ -1473,6 +1524,7 @@ async def get_me(
         )
         return UserMeResponse(
             credits=user.compat_credits,
+            compatCredits=user.compat_credits,
             hasFull=user.has_full,
             userId=user.id,
             lang=user.lang,
@@ -1490,6 +1542,7 @@ async def compatibility_me(
         )
         return UserMeResponse(
             credits=user.compat_credits,
+            compatCredits=user.compat_credits,
             hasFull=user.has_full,
             userId=user.id,
             lang=user.lang,
@@ -1613,6 +1666,7 @@ async def compatibility_purchase_pack(
                     await session.refresh(user)
                     return UserMeResponse(
                         credits=user.compat_credits,
+                        compatCredits=user.compat_credits,
                         hasFull=user.has_full,
                         userId=user.id,
                         lang=user.lang,
@@ -1630,6 +1684,7 @@ async def compatibility_purchase_pack(
         await session.refresh(user)
         return UserMeResponse(
             credits=user.compat_credits,
+            compatCredits=user.compat_credits,
             hasFull=user.has_full,
             userId=user.id,
             lang=user.lang,
