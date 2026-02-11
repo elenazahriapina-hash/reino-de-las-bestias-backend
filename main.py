@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from datetime import datetime
+import logging
 
 from dotenv import load_dotenv
 
@@ -16,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from ai import (
@@ -77,6 +79,8 @@ from schemas import (
 )
 
 app = FastAPI()
+logger = logging.getLogger("reino_backend")
+
 
 GOOGLE_WEB_CLIENT_ID = os.getenv("GOOGLE_WEB_CLIENT_ID", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -615,6 +619,10 @@ def clamp_credits(value: int) -> int:
     return max(0, value)
 
 
+def is_full_unlocked(user: User) -> bool:
+    return bool(user.has_full)
+
+
 def apply_full_bonus(user: User) -> bool:
     if not user.full_bonus_awarded:
         user.has_full = True
@@ -627,11 +635,25 @@ def apply_full_bonus(user: User) -> bool:
 
 
 def build_register_response(user: User) -> RegisterResponse:
+    full_unlocked = is_full_unlocked(user)
     return RegisterResponse(
         userId=user.id,
         token=user.auth_token,
         credits=user.compat_credits,
-        hasFull=user.has_full,
+        hasFull=full_unlocked,
+        fullUnlocked=full_unlocked,
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            telegram=user.telegram,
+            name=user.name,
+            lang=user.lang,
+            has_full=full_unlocked,
+            full_unlocked=full_unlocked,
+            packs_bought=user.packs_bought,
+            compat_credits=user.compat_credits,
+            created_at=user.created_at,
+        ),
     )
 
 
@@ -766,6 +788,7 @@ async def ensure_run_and_answers(
     ]
     session.add_all(answers_to_save)
     print(f"💾 DB: saved answers count={len(answers_to_save)}")
+    logger.info("run.created run_id=%s answers=%s", run_id, len(answers_to_save))
     return str(run_id)
 
 
@@ -1126,38 +1149,47 @@ async def analyze_full(
     x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
 ):
     try:
-        print("📥 FULL payload result_id:", payload.result_id)
-        try:
-            run_uuid = uuid.UUID(payload.result_id)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail="Invalid result_id format"
-            ) from exc
+        run_uuid = uuid.UUID(payload.result_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid result_id format") from exc
 
-        async with SessionLocal() as session:
-            async with session.begin():
-                run = await session.get(Run, run_uuid)
-                short_result = await session.get(ShortResultORM, run_uuid)
+    async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        full_unlocked = is_full_unlocked(user)
+        logger.info(
+            "full.requested run_id=%s user_id=%s unlocked=%s",
+            run_uuid,
+            user.id,
+            full_unlocked,
+        )
+        if not full_unlocked:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "FULL_LOCKED", "result_id": str(run_uuid)},
+            )
+
+        async with session.begin():
+            run = await session.get(Run, run_uuid)
+            short_result = await session.get(ShortResultORM, run_uuid)
+            if run is None:
+                raise HTTPException(status_code=404, detail="Run not found")
+            if short_result is None:
+                raise HTTPException(
+                    status_code=500, detail="short_result missing for existing run"
+                )
+
+            existing_full = await session.get(FullResultORM, run_uuid)
+            if existing_full is not None:
+                text = existing_full.text
+            else:
                 answers_query = await session.execute(
                     select(RunAnswer)
                     .where(RunAnswer.run_id == run_uuid)
                     .order_by(RunAnswer.question_id)
                 )
                 answers_rows = answers_query.scalars().all()
-                print(
-                    "🔎 FULL lookup:",
-                    f"run_found={run is not None}",
-                    f"short_result_found={short_result is not None}",
-                    f"answers_count={len(answers_rows)}",
-                )
-
-                if run is None:
-                    raise HTTPException(status_code=404, detail="Run not found")
-                if short_result is None:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="short_result missing for existing run",
-                    )
 
                 answers = [
                     TestAnswer(questionId=row.question_id, answer=row.answer)
@@ -1165,21 +1197,17 @@ async def analyze_full(
                 ]
                 answers_text = build_answers_text(answers)
 
-                animal_code = short_result.animal
-                element_code = short_result.element
-                gender_form = short_result.gender_form
-
                 animal_display = get_animal_display_name(
-                    animal_code=animal_code,
+                    animal_code=short_result.animal,
                     lang=run.lang,
-                    gender=gender_form,
+                    gender=short_result.gender_form,
                 )
                 element_label = get_element_display_name(
-                    element_code=element_code,
+                    element_code=short_result.element,
                     lang=run.lang,
                 )
                 element_display = get_element_display_name(
-                    element_code=element_code,
+                    element_code=short_result.element,
                     lang=run.lang,
                     ru_case="genitive_for_archetype_line",
                 )
@@ -1187,15 +1215,13 @@ async def analyze_full(
                 prompt = build_full_prompt(
                     name=run.name,
                     lang=run.lang,
-                    gender=gender_form,
+                    gender=short_result.gender_form,
                     animal_display=animal_display,
                     element_label=element_label,
                     element_display=element_display,
                     answers_text=answers_text,
                 )
                 text = run_full_analysis(prompt, run.lang)
-
-                print("FULL tx active before save:", session.in_transaction())
 
                 full_stmt = (
                     insert(FullResultORM)
@@ -1206,51 +1232,36 @@ async def analyze_full(
                     )
                 )
                 await session.execute(full_stmt)
-                saved_full = await session.get(FullResultORM, run_uuid)
-                print("FULL verify saved:", saved_full is not None)
-                print(f"💾 DB: saved full_result run_id={run_uuid}")
-                token = extract_auth_token(authorization, x_auth_token)
-                if token:
-                    user = await session.scalar(
-                        select(User).where(User.auth_token == token)
+
+            existing_result = await session.get(UserResult, user.id)
+            if existing_result:
+                existing_result.animal_code = short_result.animal
+                existing_result.element_ru = short_result.element
+                existing_result.genderForm = short_result.gender_form
+                existing_result.short_text = short_result.text
+                existing_result.full_text = text
+            else:
+                session.add(
+                    UserResult(
+                        user_id=user.id,
+                        animal_code=short_result.animal,
+                        element_ru=short_result.element,
+                        genderForm=short_result.gender_form,
+                        short_text=short_result.text,
+                        full_text=text,
                     )
-                    if user:
-                        existing_result = await session.get(UserResult, user.id)
-                        if existing_result:
-                            existing_result.animal_code = animal_code
-                            existing_result.element_ru = element_code
-                            existing_result.genderForm = gender_form
-                            existing_result.short_text = short_result.text
-                            existing_result.full_text = text
-                        else:
-                            session.add(
-                                UserResult(
-                                    user_id=user.id,
-                                    animal_code=animal_code,
-                                    element_ru=element_code,
-                                    genderForm=gender_form,
-                                    short_text=short_result.text,
-                                    full_text=text,
-                                )
-                            )
-                        apply_full_bonus(user)
+                )
 
-        return {
-            "type": "full",
-            "result_id": str(run_uuid),
-            "result": {
-                "animal": animal_code,
-                "element": element_code,
-                "genderForm": gender_form,
-                "text": text,
-            },
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("❌ FULL ANALYSIS ERROR:", e)
-        raise HTTPException(status_code=500, detail="Ошибка анализа")
+    return {
+        "type": "full",
+        "result_id": str(run_uuid),
+        "result": {
+            "animal": short_result.animal,
+            "element": short_result.element,
+            "genderForm": short_result.gender_form,
+            "text": text,
+        },
+    }
 
 
 @app.post("/analyze/full/legacy", response_model=FullResponse)
@@ -1341,12 +1352,24 @@ async def register(payload: RegisterRequest):
 async def auth_google(payload: GoogleAuthRequest):
     if not GOOGLE_WEB_CLIENT_ID:
         raise HTTPException(status_code=500, detail="Google auth not configured")
+    if not payload.idToken:
+        raise HTTPException(status_code=400, detail="idToken is required")
+
+    token_tail = payload.idToken[-6:]
     try:
         id_info = google_id_token.verify_oauth2_token(
             payload.idToken, google_requests.Request(), GOOGLE_WEB_CLIENT_ID
         )
-    except Exception as exc:
+    except ValueError as exc:
+        logger.warning(
+            "auth.google.invalid reason=%s token_tail=%s", str(exc), token_tail
+        )
         raise HTTPException(status_code=401, detail="Invalid Google token") from exc
+    except Exception as exc:
+        logger.exception(
+            "auth.google.unexpected_verify_error token_tail=%s", token_tail
+        )
+        raise HTTPException(status_code=500, detail="Google auth failed") from exc
 
     google_sub = id_info.get("sub")
     email = id_info.get("email")
@@ -1356,7 +1379,8 @@ async def auth_google(payload: GoogleAuthRequest):
         or (email.split("@")[0] if email else "User")
     )
     if not google_sub:
-        raise HTTPException(status_code=400, detail="Google sub missing")
+        logger.warning("auth.google.invalid missing_sub token_tail=%s", token_tail)
+        raise HTTPException(status_code=401, detail="Invalid Google token")
 
     async with SessionLocal() as session:
         async with session.begin():
@@ -1376,15 +1400,16 @@ async def auth_google(payload: GoogleAuthRequest):
                     user.name = id_info["name"]
                 if payload.lang:
                     user.lang = payload.lang
+                if not user.auth_token:
+                    user.auth_token = uuid.uuid4().hex
             else:
-                auth_token = uuid.uuid4().hex
                 user = User(
                     email=email,
                     google_sub=google_sub,
                     telegram=None,
                     name=name,
                     lang=payload.lang or "ru",
-                    auth_token=auth_token,
+                    auth_token=uuid.uuid4().hex,
                     has_full=False,
                     full_bonus_awarded=False,
                     packs_bought=0,
@@ -1392,7 +1417,11 @@ async def auth_google(payload: GoogleAuthRequest):
                 )
                 session.add(user)
         await session.refresh(user)
-        return build_register_response(user)
+
+    logger.info(
+        "auth.google.success user_id=%s has_email=%s", user.id, bool(user.email)
+    )
+    return build_register_response(user)
 
 
 @app.post("/auth/telegram", response_model=RegisterResponse)
@@ -1522,10 +1551,12 @@ async def get_me(
         user = await get_current_user(
             session, authorization=authorization, x_auth_token=x_auth_token
         )
+        full_unlocked = is_full_unlocked(user)
         return UserMeResponse(
             credits=user.compat_credits,
             compatCredits=user.compat_credits,
-            hasFull=user.has_full,
+            hasFull=full_unlocked,
+            fullUnlocked=full_unlocked,
             userId=user.id,
             lang=user.lang,
         )
@@ -1540,10 +1571,12 @@ async def compatibility_me(
         user = await get_current_user(
             session, authorization=authorization, x_auth_token=x_auth_token
         )
+        full_unlocked = is_full_unlocked(user)
         return UserMeResponse(
             credits=user.compat_credits,
             compatCredits=user.compat_credits,
-            hasFull=user.has_full,
+            hasFull=full_unlocked,
+            fullUnlocked=full_unlocked,
             userId=user.id,
             lang=user.lang,
         )
@@ -1602,13 +1635,15 @@ async def purchase_full(
             )
             apply_full_bonus(user)
         await session.refresh(user)
+        full_unlocked = is_full_unlocked(user)
         return UserResponse(
             id=user.id,
             email=user.email,
             telegram=user.telegram,
             name=user.name,
             lang=user.lang,
-            has_full=user.has_full,
+            has_full=full_unlocked,
+            full_unlocked=full_unlocked,
             packs_bought=user.packs_bought,
             compat_credits=user.compat_credits,
             created_at=user.created_at,
@@ -1628,13 +1663,15 @@ async def purchase_compat_pack(
             user.packs_bought += 1
             user.compat_credits = clamp_credits(user.compat_credits + 3)
         await session.refresh(user)
+        full_unlocked = is_full_unlocked(user)
         return UserResponse(
             id=user.id,
             email=user.email,
             telegram=user.telegram,
             name=user.name,
             lang=user.lang,
-            has_full=user.has_full,
+            has_full=full_unlocked,
+            full_unlocked=full_unlocked,
             packs_bought=user.packs_bought,
             compat_credits=user.compat_credits,
             created_at=user.created_at,
@@ -1664,10 +1701,12 @@ async def compatibility_purchase_pack(
                             status_code=409, detail="Request ID already used"
                         )
                     await session.refresh(user)
+                    full_unlocked = is_full_unlocked(user)
                     return UserMeResponse(
                         credits=user.compat_credits,
                         compatCredits=user.compat_credits,
-                        hasFull=user.has_full,
+                        hasFull=full_unlocked,
+                        fullUnlocked=full_unlocked,
                         userId=user.id,
                         lang=user.lang,
                     )
@@ -1682,10 +1721,12 @@ async def compatibility_purchase_pack(
                     )
                 )
         await session.refresh(user)
+        full_unlocked = is_full_unlocked(user)
         return UserMeResponse(
             credits=user.compat_credits,
             compatCredits=user.compat_credits,
-            hasFull=user.has_full,
+            hasFull=full_unlocked,
+            fullUnlocked=full_unlocked,
             userId=user.id,
             lang=user.lang,
         )
@@ -2063,31 +2104,48 @@ async def compatibility_list(
 
 
 @app.get("/result/full/{runId}", response_model=FullResponse)
-async def get_full_result(runId: str):
+async def get_full_result(
+    runId: str,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
+):
     try:
         run_uuid = uuid.UUID(runId)
     except ValueError:
         raise HTTPException(status_code=404, detail="Full result not found")
 
     async with SessionLocal() as session:
+        user = await get_current_user(
+            session, authorization=authorization, x_auth_token=x_auth_token
+        )
+        full_unlocked = is_full_unlocked(user)
+        logger.info(
+            "full.requested run_id=%s user_id=%s unlocked=%s",
+            run_uuid,
+            user.id,
+            full_unlocked,
+        )
+        if not full_unlocked:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "FULL_LOCKED", "result_id": str(run_uuid)},
+            )
         result = await session.get(FullResultORM, run_uuid)
         short_result = await session.get(ShortResultORM, run_uuid)
 
     if result is None or short_result is None:
         raise HTTPException(status_code=404, detail="Full result not found")
 
-    return (
-        {
-            "type": "full",
-            "result_id": str(result.run_id),
-            "result": {
-                "animal": short_result.animal,
-                "element": short_result.element,
-                "genderForm": short_result.gender_form,
-                "text": result.text,
-            },
+    return {
+        "type": "full",
+        "result_id": str(result.run_id),
+        "result": {
+            "animal": short_result.animal,
+            "element": short_result.element,
+            "genderForm": short_result.gender_form,
+            "text": result.text,
         },
-    )
+    }
 
 
 @app.get("/health/db")

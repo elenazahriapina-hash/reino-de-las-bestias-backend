@@ -59,7 +59,7 @@ class RegisterRequest(BaseModel):
 
 
 class GoogleAuthRequest(BaseModel):
-    idToken: str
+    idToken: str | None = None
     lang: Literal["ru", "en", "es", "pt"] | None = None
     name: str | None = None
 
@@ -90,6 +90,7 @@ class UserResponse(BaseModel):
     name: str
     lang: str
     has_full: bool = Field(..., alias="hasFull")
+    full_unlocked: bool = Field(..., alias="fullUnlocked")
     packs_bought: int = Field(..., alias="packsBought")
     compat_credits: int = Field(..., alias="compatCredits")
     created_at: datetime
@@ -103,6 +104,8 @@ class RegisterResponse(BaseModel):
     token: str
     credits: int
     hasFull: bool
+    fullUnlocked: bool
+    user: UserResponse | None = None
 
 
 class DevSeedUserRequest(BaseModel):
@@ -125,6 +128,7 @@ class UserMeResponse(BaseModel):
     credits: int
     compat_credits: int = Field(..., alias="compatCredits")
     has_full: bool = Field(..., alias="hasFull")
+    full_unlocked: bool = Field(..., alias="fullUnlocked")
     user_id: int = Field(..., alias="userId")
     lang: str
 
