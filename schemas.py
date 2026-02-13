@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TestAnswer(BaseModel):
@@ -89,14 +89,13 @@ class UserResponse(BaseModel):
     telegram: str | None
     name: str
     lang: str
-    has_full: bool = Field(..., alias="hasFull")
-    full_unlocked: bool = Field(..., alias="fullUnlocked")
-    packs_bought: int = Field(..., alias="packsBought")
-    compat_credits: int = Field(..., alias="compatCredits")
+    has_full: bool = Field(default=False, alias="hasFull")
+    full_unlocked: bool = Field(default=False, alias="fullUnlocked")
+    packs_bought: int = Field(default=0, alias="packsBought")
+    compat_credits: int = Field(default=0, alias="compatCredits")
     created_at: datetime
 
-    class Config:
-        allow_population_by_field_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class RegisterResponse(BaseModel):
@@ -105,6 +104,8 @@ class RegisterResponse(BaseModel):
     credits: int
     hasFull: bool
     fullUnlocked: bool
+    packsBought: int = 0
+    compatCredits: int = 0
     user: UserResponse | None = None
 
 

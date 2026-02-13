@@ -635,25 +635,36 @@ def apply_full_bonus(user: User) -> bool:
 
 
 def build_register_response(user: User) -> RegisterResponse:
-    full_unlocked = is_full_unlocked(user)
+    has_full = bool(
+        getattr(user, "has_full", False) or getattr(user, "full_unlocked", False)
+    )
+    full_unlocked = bool(getattr(user, "full_unlocked", False))
+    packs_bought = int(getattr(user, "packs_bought", 0) or 0)
+    compat_credits = int(
+        getattr(user, "compat_credits", getattr(user, "credits", 0)) or 0
+    )
+
+    user_payload = {
+        "id": user.id,
+        "email": user.email,
+        "telegram": user.telegram,
+        "name": user.name,
+        "lang": user.lang,
+        "hasFull": has_full,
+        "fullUnlocked": full_unlocked,
+        "packsBought": packs_bought,
+        "compatCredits": compat_credits,
+        "created_at": user.created_at,
+    }
     return RegisterResponse(
         userId=user.id,
         token=user.auth_token,
-        credits=user.compat_credits,
-        hasFull=full_unlocked,
+        credits=compat_credits,
+        hasFull=has_full,
         fullUnlocked=full_unlocked,
-        user=UserResponse(
-            id=user.id,
-            email=user.email,
-            telegram=user.telegram,
-            name=user.name,
-            lang=user.lang,
-            has_full=full_unlocked,
-            full_unlocked=full_unlocked,
-            packs_bought=user.packs_bought,
-            compat_credits=user.compat_credits,
-            created_at=user.created_at,
-        ),
+        packsBought=packs_bought,
+        compatCredits=compat_credits,
+        user=UserResponse.model_validate(user_payload),
     )
 
 
